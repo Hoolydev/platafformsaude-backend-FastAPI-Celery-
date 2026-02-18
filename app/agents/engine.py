@@ -1,361 +1,225 @@
 """
-Agent Engine - LangGraph-based conversational AI agent
+Agent Engine — LangGraph principal
 """
 
-from typing import Dict, Any, List, Optional, Annotated
-from typing_extensions import TypedDict
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from typing import Any, Dict, List, Optional, TypedDict, Annotated
+import operator
+
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 from sqlalchemy.ext.asyncio import AsyncSession
-import json
 
-from app.agents.memory import AgentMemory
-from app.agents.humanizer import MessageHumanizer
-from app.agents.voice import WhisperTranscription, ElevenLabsVoice
-from app.agents.tools.calendar import CalendarTool
-from app.agents.tools.procedures import ProceduresTool
-from app.agents.tools.escalation import EscalationTool
-from app.agents.tools.followup import FollowUpTool
+from app.config import settings
+from app.agents import memory as mem
+from app.agents.humanizer import prepare_messages
+from app.models.message import MessageOrigem, MessageTipo
 
+
+# ─── State ────────────────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
-    """Estado do agente no LangGraph"""
-    messages: List[Dict[str, Any]]
+    messages: Annotated[List[BaseMessage], operator.add]
     tenant_id: int
     conversation_id: int
     contact_id: int
     agent_config: Dict[str, Any]
-    patient_context: str
-    should_escalate: bool
-    actions_executed: List[str]
-    final_response: Optional[List[Dict[str, Any]]]
+    deve_escalar: bool
+    respostas: List[Dict[str, Any]]
 
 
-class AgentEngine:
-    """
-    Engine principal do agente de IA usando LangGraph
-    
-    Fluxo:
-    1. Recebe mensagem do usuário
-    2. Carrega contexto (memória + info paciente)
-    3. Processa com LLM
-    4. Executa ferramentas se necessário
-    5. Humaniza resposta (quebra + delays)
-    6. Retorna mensagens para envio
-    """
-    
-    def __init__(
-        self,
-        db: AsyncSession,
-        tenant_id: int,
-        conversation_id: int,
-        contact_id: int,
-        agent_config: Dict[str, Any]
-    ):
-        self.db = db
-        self.tenant_id = tenant_id
-        self.conversation_id = conversation_id
-        self.contact_id = contact_id
-        self.agent_config = agent_config
-        
-        # Componentes
-        self.memory = AgentMemory(db, conversation_id)
-        self.humanizer = MessageHumanizer()
-        self.whisper = WhisperTranscription()
-        self.elevenlabs = ElevenLabsVoice()
-        
-        # Ferramentas
-        self.calendar_tool = CalendarTool(db, tenant_id)
-        self.procedures_tool = ProceduresTool(db, tenant_id)
-        self.escalation_tool = EscalationTool(db, conversation_id)
-        self.followup_tool = FollowUpTool(tenant_id)
-        
-        # LLM
-        self.llm = self._init_llm()
-        
-        # Graph
-        self.graph = self._build_graph()
-    
-    def _init_llm(self):
-        """Inicializa LLM baseado na configuração do agente"""
-        model = self.agent_config.get("modelo", "gpt-4o")
-        temperature = self.agent_config.get("temperatura", 0.7)
-        
-        if model.startswith("gpt"):
-            return ChatOpenAI(
-                model=model,
-                temperature=temperature
-            )
-        elif model.startswith("claude"):
-            return ChatAnthropic(
-                model=model,
-                temperature=temperature
-            )
-        else:
-            # Default
-            return ChatOpenAI(model="gpt-4o", temperature=0.7)
-    
-    def _build_graph(self) -> StateGraph:
-        """Constrói o grafo LangGraph"""
-        workflow = StateGraph(AgentState)
-        
-        # Nodes
-        workflow.add_node("load_context", self._load_context)
-        workflow.add_node("process_message", self._process_message)
-        workflow.add_node("execute_tools", self._execute_tools)
-        workflow.add_node("humanize_response", self._humanize_response)
-        
-        # Edges
-        workflow.set_entry_point("load_context")
-        workflow.add_edge("load_context", "process_message")
-        workflow.add_conditional_edges(
-            "process_message",
-            self._should_use_tools,
-            {
-                "tools": "execute_tools",
-                "respond": "humanize_response"
-            }
+# ─── LLM factory ──────────────────────────────────────────────────────────────
+
+def _get_llm(modelo: str):
+    if modelo.startswith("claude"):
+        return ChatAnthropic(
+            model=modelo,
+            api_key=settings.ANTHROPIC_API_KEY,
+            temperature=0.7,
         )
-        workflow.add_edge("execute_tools", "process_message")
-        workflow.add_edge("humanize_response", END)
-        
-        return workflow.compile()
-    
-    async def _load_context(self, state: AgentState) -> AgentState:
-        """Carrega contexto do paciente e histórico"""
-        context = await self.memory.get_context_for_llm(state["contact_id"])
-        state["patient_context"] = context
-        return state
-    
-    async def _process_message(self, state: AgentState) -> AgentState:
-        """Processa mensagem com LLM"""
-        # Montar system prompt
-        system_prompt = self._build_system_prompt(state)
-        
-        # Montar mensagens
-        messages = [SystemMessage(content=system_prompt)]
-        
-        # Adicionar histórico
-        for msg in state["messages"]:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            else:
-                messages.append(AIMessage(content=msg["content"]))
-        
-        # Chamar LLM
-        response = await self.llm.ainvoke(messages)
-        
-        # Adicionar resposta ao estado
-        state["messages"].append({
-            "role": "assistant",
-            "content": response.content
-        })
-        
-        # Verificar se deve escalar
-        if "escalar para humano" in response.content.lower():
-            state["should_escalate"] = True
-        
-        return state
-    
-    def _build_system_prompt(self, state: AgentState) -> str:
-        """Constrói system prompt personalizado"""
-        base_prompt = self.agent_config.get("instrucoes", "")
-        
-        # Adicionar contexto do paciente
-        prompt_parts = [base_prompt]
-        
-        if state.get("patient_context"):
-            prompt_parts.append(f"\n\n{state['patient_context']}")
-        
-        # Adicionar instruções de ferramentas
-        ferramentas_ativas = self.agent_config.get("ferramentas_ativas", [])
-        if ferramentas_ativas:
-            prompt_parts.append("\n\n=== FERRAMENTAS DISPONÍVEIS ===")
-            
-            if "buscar_horarios" in ferramentas_ativas:
-                prompt_parts.append("- buscar_horarios_disponiveis(data, procedimento_id)")
-            if "criar_agendamento" in ferramentas_ativas:
-                prompt_parts.append("- criar_agendamento(contact_id, procedimento_id, data_hora, observacoes)")
-            if "cancelar_agendamento" in ferramentas_ativas:
-                prompt_parts.append("- cancelar_agendamento(id_evento, motivo)")
-            if "buscar_procedimento" in ferramentas_ativas:
-                prompt_parts.append("- buscar_informacoes_procedimento(nome_procedimento)")
-            if "escalar" in ferramentas_ativas:
-                prompt_parts.append("- escalar_para_humano(motivo, urgencia)")
-        
-        # Instruções de humanização
-        prompt_parts.append("\n\n=== INSTRUÇÕES DE COMUNICAÇÃO ===")
-        prompt_parts.append("- Use linguagem natural e humanizada")
-        prompt_parts.append("- Seja empático e profissional")
-        prompt_parts.append("- Mantenha respostas concisas (máximo 150 caracteres por mensagem)")
-        prompt_parts.append("- Se precisar de mais informações, faça perguntas claras")
-        
-        return "\n".join(prompt_parts)
-    
-    def _should_use_tools(self, state: AgentState) -> str:
-        """Decide se deve usar ferramentas ou responder diretamente"""
-        last_message = state["messages"][-1]["content"]
-        
-        # Verificar se LLM solicitou uso de ferramenta
-        # TODO: Implementar detecção de tool calls do LLM
-        # Por enquanto, responder diretamente
-        
-        return "respond"
-    
-    async def _execute_tools(self, state: AgentState) -> AgentState:
-        """Executa ferramentas solicitadas pelo LLM"""
-        # TODO: Implementar execução de ferramentas
-        # Parsear tool calls da resposta do LLM
-        # Executar ferramentas correspondentes
-        # Adicionar resultados ao estado
-        
-        return state
-    
-    async def _humanize_response(self, state: AgentState) -> AgentState:
-        """Humaniza resposta (quebra mensagens + delays)"""
-        last_message = state["messages"][-1]["content"]
-        
-        # Quebrar em mensagens menores
-        humanized = self.humanizer.humanize(last_message)
-        
-        state["final_response"] = humanized
-        return state
-    
-    async def process(
-        self,
-        message: Dict[str, Any],
-        historico: Optional[List[Dict[str, Any]]] = None
-    ) -> Dict[str, Any]:
-        """
-        Processa mensagem do usuário
-        
-        Args:
-            message: {tipo, conteudo, metadados}
-            historico: Histórico de mensagens (opcional)
-        
-        Returns:
-            {
-                mensagens: [{conteudo, delay_ms, tipo}],
-                acoes_executadas: [],
-                deve_escalar: bool,
-                metadados: {}
-            }
-        """
-        # Processar mídia se necessário
-        content = await self._process_media(message)
-        
-        # Carregar histórico se não fornecido
-        if not historico:
-            historico = await self.memory.get_conversation_history()
-        
-        # Montar estado inicial
-        initial_state: AgentState = {
-            "messages": historico + [{
-                "role": "user",
-                "content": content
-            }],
-            "tenant_id": self.tenant_id,
-            "conversation_id": self.conversation_id,
-            "contact_id": self.contact_id,
-            "agent_config": self.agent_config,
-            "patient_context": "",
-            "should_escalate": False,
-            "actions_executed": [],
-            "final_response": None
-        }
-        
-        # Executar graph
-        final_state = await self.graph.ainvoke(initial_state)
-        
-        # Processar voz se necessário
-        messages = final_state["final_response"] or []
-        if self._should_use_voice():
-            messages = await self._add_voice_to_messages(messages)
-        
-        return {
-            "mensagens": messages,
-            "acoes_executadas": final_state["actions_executed"],
-            "deve_escalar": final_state["should_escalate"],
-            "metadados": {
-                "model": self.agent_config.get("modelo"),
-                "total_messages": len(final_state["messages"])
-            }
-        }
-    
-    async def _process_media(self, message: Dict[str, Any]) -> str:
-        """Processa mídia (imagem, áudio) e retorna texto"""
-        tipo = message.get("tipo")
-        conteudo = message.get("conteudo")
-        
-        if tipo == "audio":
-            # Transcrever áudio
-            audio_url = message.get("metadados", {}).get("midia_url")
-            if audio_url:
-                transcription = await self.whisper.transcribe_from_url(audio_url)
-                return transcription
-        
-        elif tipo == "image":
-            # TODO: Processar imagem com GPT-4o Vision
-            # Por enquanto, retornar descrição
-            return f"[Imagem recebida] {conteudo}"
-        
-        return conteudo
-    
-    def _should_use_voice(self) -> bool:
-        """Verifica se deve usar voz na resposta"""
-        # Verificar se tenant tem ElevenLabs configurado
-        voice_config = self.agent_config.get("voz", {})
-        return voice_config.get("ativo", False)
-    
-    async def _add_voice_to_messages(
-        self,
-        messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Adiciona áudio às mensagens"""
-        voice_config = self.agent_config.get("voz", {})
-        voice_id = voice_config.get("voice_id")
-        
-        if not voice_id:
-            return messages
-        
-        # Adicionar áudio para cada mensagem
-        for msg in messages:
-            try:
-                audio_base64 = await self.elevenlabs.text_to_speech_base64(
-                    msg["conteudo"],
-                    voice_id
-                )
-                msg["audio_base64"] = audio_base64
-                msg["tipo"] = "audio"
-            except Exception as e:
-                print(f"Erro ao gerar áudio: {str(e)}")
-        
-        return messages
+    return ChatOpenAI(
+        model=modelo or "gpt-4o",
+        api_key=settings.OPENAI_API_KEY,
+        temperature=0.7,
+    )
 
 
-# Função helper para uso nos workers
-async def process_message_with_agent(
+# ─── Tools (LangChain @tool wrappers) ─────────────────────────────────────────
+# As tools recebem db via closure quando o grafo é instanciado por run_agent()
+
+def _build_tools(db: AsyncSession, tenant_id: int, conversation_id: int):
+
+    @tool
+    async def buscar_horarios(data: str, procedimento_id: Optional[int] = None) -> str:
+        """Busca horários disponíveis na agenda. data no formato YYYY-MM-DD."""
+        from datetime import date
+        from app.agents.tools.calendar import buscar_horarios_disponiveis
+        slots = await buscar_horarios_disponiveis(db, tenant_id, date.fromisoformat(data), procedimento_id)
+        return str(slots) if slots else "Nenhum horário disponível para esta data."
+
+    @tool
+    async def criar_agendamento(procedimento_id: int, data_hora: str, titulo: str = "Consulta") -> str:
+        """Cria agendamento. data_hora no formato ISO 8601."""
+        from datetime import datetime
+        from app.agents.tools.calendar import criar_agendamento as _criar
+        result = await _criar(db, tenant_id, 0, procedimento_id, datetime.fromisoformat(data_hora), titulo)
+        return str(result)
+
+    @tool
+    async def cancelar_agendamento(id_evento: str) -> str:
+        """Cancela um agendamento pelo ID do evento."""
+        from app.agents.tools.calendar import cancelar_agendamento as _cancelar
+        result = await _cancelar(db, tenant_id, id_evento)
+        return str(result)
+
+    @tool
+    async def buscar_procedimento(nome: str) -> str:
+        """Busca informações de um procedimento pelo nome."""
+        from app.agents.tools.procedures import buscar_procedimento as _buscar
+        result = await _buscar(db, tenant_id, nome)
+        return str(result) if result else "Procedimento não encontrado."
+
+    @tool
+    async def escalar(motivo: str) -> str:
+        """Escala a conversa para um atendente humano quando necessário."""
+        from app.agents.tools.escalation import escalar as _escalar
+        result = await _escalar(db, tenant_id, conversation_id, motivo)
+        return str(result)
+
+    @tool
+    async def agendar_followup(mensagem: str, data_hora: str) -> str:
+        """Agenda envio de follow-up futuro. data_hora no formato ISO 8601."""
+        from datetime import datetime
+        from app.agents.tools.followup import agendar_followup as _agendar
+        result = await _agendar(tenant_id, 0, mensagem, datetime.fromisoformat(data_hora), conversation_id)
+        return str(result)
+
+    return [buscar_horarios, criar_agendamento, cancelar_agendamento,
+            buscar_procedimento, escalar, agendar_followup]
+
+
+# ─── Graph nodes ──────────────────────────────────────────────────────────────
+
+def _should_continue(state: AgentState):
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "tools"
+    return END
+
+
+async def _agent_node(state: AgentState, llm_with_tools):
+    response = await llm_with_tools.ainvoke(state["messages"])
+    return {"messages": [response]}
+
+
+def _collect_response(state: AgentState) -> Dict[str, Any]:
+    """Coleta a resposta final do agente e humaniza."""
+    last = state["messages"][-1]
+    content = last.content if hasattr(last, "content") else str(last)
+
+    deve_escalar = "escalar" in content.lower() or state.get("deve_escalar", False)
+    mensagens = prepare_messages(content)
+
+    return {
+        "respostas": mensagens,
+        "deve_escalar": deve_escalar,
+    }
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+async def run_agent(
     db: AsyncSession,
     tenant_id: int,
     conversation_id: int,
     contact_id: int,
+    message: str,
     agent_config: Dict[str, Any],
-    message: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Processa mensagem com agente IA
-    
-    Função helper para ser chamada pelos workers Celery
+    Executa o agente LangGraph para uma mensagem recebida.
+
+    Returns:
+        {
+            "mensagens": [{"conteudo": str, "delay_ms": int}],
+            "deve_escalar": bool
+        }
     """
-    engine = AgentEngine(
-        db=db,
-        tenant_id=tenant_id,
-        conversation_id=conversation_id,
-        contact_id=contact_id,
-        agent_config=agent_config
-    )
-    
-    return await engine.process(message)
+    modelo = agent_config.get("modelo_llm", "gpt-4o")
+    instrucoes = agent_config.get("instrucoes", "Você é um assistente de saúde prestativo.")
+
+    # Busca histórico
+    historico = await mem.get_history(db, conversation_id, limit=20)
+    contact_info = await mem.get_contact_info(db, contact_id)
+
+    # Monta system prompt
+    system_content = instrucoes
+    if contact_info:
+        system_content += (
+            f"\n\nInformações do contato:\n"
+            f"Nome: {contact_info.get('nome', 'Desconhecido')}\n"
+            f"Telefone: {contact_info.get('telefone', '')}\n"
+            f"Dados adicionais: {contact_info.get('metadados', {})}"
+        )
+
+    # Converte histórico para mensagens LangChain
+    lc_messages: List[BaseMessage] = [SystemMessage(content=system_content)]
+    for h in historico:
+        if h.origem == MessageOrigem.cliente:
+            lc_messages.append(HumanMessage(content=h.conteudo))
+        else:
+            lc_messages.append(AIMessage(content=h.conteudo))
+
+    # Adiciona mensagem atual
+    lc_messages.append(HumanMessage(content=message))
+
+    # Salva mensagem do cliente
+    await mem.save_message(db, conversation_id, tenant_id, MessageOrigem.cliente, message)
+
+    # Monta tools e LLM
+    tools = _build_tools(db, tenant_id, conversation_id)
+    llm = _get_llm(modelo)
+    llm_with_tools = llm.bind_tools(tools)
+
+    # Monta grafo LangGraph
+    tool_node = ToolNode(tools)
+
+    async def agent_node(state: AgentState):
+        return await _agent_node(state, llm_with_tools)
+
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", tool_node)
+    graph.set_entry_point("agent")
+    graph.add_conditional_edges("agent", _should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    compiled = graph.compile()
+
+    # Executa
+    initial_state: AgentState = {
+        "messages": lc_messages,
+        "tenant_id": tenant_id,
+        "conversation_id": conversation_id,
+        "contact_id": contact_id,
+        "agent_config": agent_config,
+        "deve_escalar": False,
+        "respostas": [],
+    }
+
+    final_state = await compiled.ainvoke(initial_state)
+    result = _collect_response(final_state)
+
+    # Salva resposta do agente
+    for msg in result["respostas"]:
+        await mem.save_message(
+            db, conversation_id, tenant_id,
+            MessageOrigem.agente, msg["conteudo"],
+        )
+
+    return {
+        "mensagens": result["respostas"],
+        "deve_escalar": result["deve_escalar"],
+    }

@@ -1,92 +1,59 @@
 """
-Procedures Tools - Ferramentas para buscar informações de procedimentos
+Tool: Procedures — buscar procedimentos do tenant
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 
 from app.models.procedure import Procedure
 
 
-class ProceduresTool:
-    """Ferramenta para buscar informações sobre procedimentos"""
-    
-    def __init__(self, db: AsyncSession, tenant_id: int):
-        self.db = db
-        self.tenant_id = tenant_id
-    
-    async def buscar_informacoes_procedimento(
-        self,
-        nome_procedimento: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Busca informações de um procedimento pelo nome
-        
-        Args:
-            nome_procedimento: Nome ou parte do nome do procedimento
-        
-        Returns:
-            Dicionário com informações do procedimento ou None
-        """
-        # Buscar procedimento (case-insensitive, partial match)
-        result = await self.db.execute(
-            select(Procedure).where(
-                Procedure.tenant_id == self.tenant_id,
-                Procedure.ativo == True,
-                or_(
-                    Procedure.nome.ilike(f"%{nome_procedimento}%"),
-                    Procedure.categoria.ilike(f"%{nome_procedimento}%")
-                )
-            ).limit(1)
+async def buscar_procedimento(
+    db: AsyncSession,
+    tenant_id: int,
+    nome: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Busca um procedimento pelo nome (busca parcial, case-insensitive).
+    Retorna o primeiro resultado ou None.
+    """
+    result = await db.execute(
+        select(Procedure).where(
+            Procedure.tenant_id == tenant_id,
+            Procedure.nome.ilike(f"%{nome}%"),
         )
-        procedure = result.scalar_one_or_none()
-        
-        if not procedure:
-            return None
-        
-        return {
-            "id": procedure.id,
-            "nome": procedure.nome,
-            "descricao": procedure.descricao,
-            "duracao_minutos": procedure.duracao_minutos,
-            "valor": procedure.valor,
-            "convenios_aceitos": procedure.convenios_aceitos,
-            "categoria": procedure.categoria,
-            "tags": procedure.tags
+    )
+    proc = result.scalars().first()
+    if not proc:
+        return None
+    return {
+        "id": proc.id,
+        "nome": proc.nome,
+        "duracao_minutos": proc.duracao_minutos,
+        "valor": float(proc.valor) if proc.valor else None,
+        "convenios_aceitos": proc.convenios_aceitos or [],
+        "descricao": proc.descricao,
+    }
+
+
+async def listar_procedimentos(
+    db: AsyncSession,
+    tenant_id: int,
+) -> List[Dict[str, Any]]:
+    """Lista todos os procedimentos do tenant."""
+    result = await db.execute(
+        select(Procedure).where(Procedure.tenant_id == tenant_id).order_by(Procedure.nome)
+    )
+    procs = result.scalars().all()
+    return [
+        {
+            "id": p.id,
+            "nome": p.nome,
+            "duracao_minutos": p.duracao_minutos,
+            "valor": float(p.valor) if p.valor else None,
+            "convenios_aceitos": p.convenios_aceitos or [],
+            "descricao": p.descricao,
         }
-    
-    async def listar_procedimentos(
-        self,
-        categoria: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Lista todos os procedimentos disponíveis
-        
-        Args:
-            categoria: Filtrar por categoria (opcional)
-        
-        Returns:
-            Lista de procedimentos
-        """
-        query = select(Procedure).where(
-            Procedure.tenant_id == self.tenant_id,
-            Procedure.ativo == True
-        )
-        
-        if categoria:
-            query = query.where(Procedure.categoria.ilike(f"%{categoria}%"))
-        
-        result = await self.db.execute(query)
-        procedures = result.scalars().all()
-        
-        return [
-            {
-                "id": p.id,
-                "nome": p.nome,
-                "duracao_minutos": p.duracao_minutos,
-                "valor": p.valor,
-                "categoria": p.categoria
-            }
-            for p in procedures
-        ]
+        for p in procs
+    ]

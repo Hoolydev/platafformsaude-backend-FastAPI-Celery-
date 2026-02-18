@@ -1,184 +1,91 @@
 """
-Humanizer - Quebra mensagens longas e calcula delays para simular digitação humana
+Humanizer — quebra e temporiza mensagens para parecerem humanas
 """
 
-import re
 import random
+import re
 from typing import List, Dict, Any
 
+MAX_CHUNK_LEN = 150
+MS_PER_CHAR = 50
+JITTER = 0.20  # ±20%
 
-class MessageHumanizer:
+# Padrões de quebra natural (em ordem de preferência)
+_BREAK_PATTERNS = [
+    r"\n\n",          # parágrafo
+    r"\n",            # quebra de linha
+    r"(?<=[.!?])\s+", # fim de frase
+    r"(?<=,)\s+",     # vírgula
+]
+
+
+def split_message(text: str) -> List[str]:
     """
-    Quebra mensagens longas em partes menores e calcula delays de digitação
-    
-    Baseado nos workflows n8n para parecer mais humano
+    Quebra o texto em partes de até MAX_CHUNK_LEN caracteres,
+    priorizando quebras em pontuação natural.
     """
-    
-    def __init__(
-        self,
-        max_chars_per_message: int = 150,
-        ms_per_char: int = 50,
-        variation_percent: float = 0.2
-    ):
-        self.max_chars = max_chars_per_message
-        self.ms_per_char = ms_per_char
-        self.variation = variation_percent
-    
-    def humanize(self, text: str) -> List[Dict[str, Any]]:
-        """
-        Quebra texto em mensagens menores com delays calculados
-        
-        Args:
-            text: Texto completo a ser enviado
-        
-        Returns:
-            Lista de {conteudo: str, delay_ms: int, tipo: str}
-        """
-        # Quebrar em partes menores
-        parts = self._split_text(text)
-        
-        # Calcular delays para cada parte
-        messages = []
-        for part in parts:
-            delay = self._calculate_delay(part)
-            messages.append({
-                "conteudo": part.strip(),
-                "delay_ms": delay,
-                "tipo": "text"
-            })
-        
-        return messages
-    
-    def _split_text(self, text: str) -> List[str]:
-        """
-        Quebra texto em partes menores respeitando pontuação natural
-        
-        Prioridade de quebra:
-        1. Parágrafos (\n\n)
-        2. Pontos finais (.)
-        3. Vírgulas (,)
-        4. Espaços
-        """
-        # Se texto é curto, retornar como está
-        if len(text) <= self.max_chars:
-            return [text]
-        
-        parts = []
-        
-        # Primeiro, quebrar por parágrafos
-        paragraphs = text.split('\n\n')
-        
-        for paragraph in paragraphs:
-            if len(paragraph) <= self.max_chars:
-                parts.append(paragraph)
-            else:
-                # Quebrar por sentenças (pontos)
-                sentences = re.split(r'([.!?]+\s+)', paragraph)
-                
-                current_part = ""
-                for i in range(0, len(sentences), 2):
-                    sentence = sentences[i]
-                    punctuation = sentences[i + 1] if i + 1 < len(sentences) else ""
-                    
-                    full_sentence = sentence + punctuation
-                    
-                    # Se adicionar esta sentença ultrapassar o limite
-                    if len(current_part) + len(full_sentence) > self.max_chars:
-                        # Se current_part não está vazio, adicionar
-                        if current_part:
-                            parts.append(current_part.strip())
-                            current_part = full_sentence
-                        else:
-                            # Sentença muito longa, quebrar por vírgulas
-                            parts.extend(self._split_by_commas(full_sentence))
-                    else:
-                        current_part += full_sentence
-                
-                # Adicionar última parte
-                if current_part:
-                    parts.append(current_part.strip())
-        
-        return [p for p in parts if p]  # Remover vazios
-    
-    def _split_by_commas(self, text: str) -> List[str]:
-        """Quebra texto longo por vírgulas"""
-        parts = []
-        chunks = re.split(r'(,\s+)', text)
-        
-        current_part = ""
-        for i in range(0, len(chunks), 2):
-            chunk = chunks[i]
-            comma = chunks[i + 1] if i + 1 < len(chunks) else ""
-            
-            full_chunk = chunk + comma
-            
-            if len(current_part) + len(full_chunk) > self.max_chars:
-                if current_part:
-                    parts.append(current_part.strip())
-                    current_part = full_chunk
+    text = text.strip()
+    if len(text) <= MAX_CHUNK_LEN:
+        return [text]
+
+    chunks: List[str] = []
+
+    # Tenta quebrar por padrões naturais primeiro
+    for pattern in _BREAK_PATTERNS:
+        parts = re.split(pattern, text)
+        if len(parts) > 1:
+            # Agrupa partes pequenas em chunks de até MAX_CHUNK_LEN
+            current = ""
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                if len(current) + len(part) + 1 <= MAX_CHUNK_LEN:
+                    current = f"{current} {part}".strip() if current else part
                 else:
-                    # Chunk muito longo, quebrar por espaços
-                    parts.extend(self._split_by_spaces(full_chunk))
-            else:
-                current_part += full_chunk
-        
-        if current_part:
-            parts.append(current_part.strip())
-        
-        return parts
-    
-    def _split_by_spaces(self, text: str) -> List[str]:
-        """Quebra texto por espaços (último recurso)"""
-        words = text.split()
-        parts = []
-        current_part = ""
-        
-        for word in words:
-            if len(current_part) + len(word) + 1 > self.max_chars:
-                if current_part:
-                    parts.append(current_part.strip())
-                current_part = word
-            else:
-                current_part += " " + word if current_part else word
-        
-        if current_part:
-            parts.append(current_part.strip())
-        
-        return parts
-    
-    def _calculate_delay(self, text: str) -> int:
-        """
-        Calcula delay de digitação baseado no tamanho do texto
-        
-        Fórmula: (chars * ms_per_char) ± variação aleatória
-        """
-        base_delay = len(text) * self.ms_per_char
-        
-        # Adicionar variação aleatória (±20% por padrão)
-        variation_amount = base_delay * self.variation
-        random_variation = random.uniform(-variation_amount, variation_amount)
-        
-        final_delay = int(base_delay + random_variation)
-        
-        # Mínimo de 500ms, máximo de 5000ms
-        return max(500, min(5000, final_delay))
+                    if current:
+                        chunks.append(current)
+                    current = part
+            if current:
+                chunks.append(current)
+            if all(len(c) <= MAX_CHUNK_LEN for c in chunks):
+                return chunks
+            # Se ainda há chunks grandes, continua para próximo padrão
+            chunks = []
+
+    # Fallback: quebra forçada por tamanho
+    words = text.split()
+    current = ""
+    for word in words:
+        if len(current) + len(word) + 1 <= MAX_CHUNK_LEN:
+            current = f"{current} {word}".strip() if current else word
+        else:
+            if current:
+                chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
+
+    return chunks if chunks else [text]
 
 
-# Exemplo de uso
-if __name__ == "__main__":
-    humanizer = MessageHumanizer()
-    
-    text = """
-    Olá! Tudo bem? Seja bem-vindo à Clínica Saúde Total. 
-    Vejo aqui que você gostaria de agendar uma consulta com o Dr. João Silva. 
-    Temos os seguintes horários disponíveis para esta semana: 
-    Segunda-feira às 14h, terça-feira às 10h e quarta-feira às 16h. 
-    Qual horário seria melhor para você?
+def calculate_delay(text: str) -> int:
     """
-    
-    messages = humanizer.humanize(text)
-    
-    for i, msg in enumerate(messages, 1):
-        print(f"\nMensagem {i}:")
-        print(f"Conteúdo: {msg['conteudo']}")
-        print(f"Delay: {msg['delay_ms']}ms")
+    Retorna delay em ms: 50ms por caractere com variação aleatória de ±20%.
+    Mínimo de 500ms, máximo de 5000ms.
+    """
+    base = len(text) * MS_PER_CHAR
+    jitter = random.uniform(1 - JITTER, 1 + JITTER)
+    delay = int(base * jitter)
+    return max(500, min(delay, 5000))
+
+
+def prepare_messages(text: str) -> List[Dict[str, Any]]:
+    """
+    Retorna lista de {conteudo, delay_ms} prontos para envio humanizado.
+    """
+    parts = split_message(text)
+    return [
+        {"conteudo": part, "delay_ms": calculate_delay(part)}
+        for part in parts
+    ]

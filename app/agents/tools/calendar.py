@@ -1,196 +1,194 @@
 """
-Calendar Tools - Ferramentas para gerenciar agendamentos
+Tool: Calendar — buscar horários, criar e cancelar agendamentos
 """
 
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+from datetime import date, datetime
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import httpx
 
-from app.models.procedure import Procedure
-from app.models.connection import CalendarConnection
+from app.models.calendar import CalendarConnection, CalendarProvider
 
 
-class CalendarTool:
-    """
-    Ferramenta para buscar horários disponíveis e criar agendamentos
-    
-    Suporta Google Calendar e Feegow
-    """
-    
-    def __init__(self, db: AsyncSession, tenant_id: int):
-        self.db = db
-        self.tenant_id = tenant_id
-    
-    async def buscar_horarios_disponiveis(
-        self,
-        data: str,
-        procedimento_id: int,
-        duracao_minutos: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Busca horários disponíveis para agendamento
-        
-        Args:
-            data: Data no formato YYYY-MM-DD
-            procedimento_id: ID do procedimento
-            duracao_minutos: Duração (se não informado, usa do procedimento)
-        
-        Returns:
-            Lista de horários disponíveis: [{hora: "14:00", disponivel: true}, ...]
-        """
-        # Buscar procedimento
-        result = await self.db.execute(
-            select(Procedure).where(
-                Procedure.id == procedimento_id,
-                Procedure.tenant_id == self.tenant_id
-            )
+async def _get_calendar_connection(db: AsyncSession, tenant_id: int) -> Optional[CalendarConnection]:
+    result = await db.execute(
+        select(CalendarConnection).where(
+            CalendarConnection.tenant_id == tenant_id,
+            CalendarConnection.ativo == True,  # noqa: E712
         )
-        procedure = result.scalar_one_or_none()
-        
-        if not procedure:
-            return []
-        
-        duracao = duracao_minutos or procedure.duracao_minutos
-        
-        # Buscar conexão de calendário ativa
-        result = await self.db.execute(
-            select(CalendarConnection).where(
-                CalendarConnection.tenant_id == self.tenant_id,
-                CalendarConnection.ativo == True
-            ).limit(1)
-        )
-        calendar_conn = result.scalar_one_or_none()
-        
-        if not calendar_conn:
-            # Sem integração, retornar horários padrão
-            return self._get_default_slots(data, duracao)
-        
-        # Buscar horários no provider
-        if calendar_conn.provider.value == "google":
-            return await self._get_google_calendar_slots(calendar_conn, data, duracao)
-        elif calendar_conn.provider.value == "feegow":
-            return await self._get_feegow_slots(calendar_conn, data, duracao)
-        
+    )
+    return result.scalar_one_or_none()
+
+
+async def buscar_horarios_disponiveis(
+    db: AsyncSession,
+    tenant_id: int,
+    data: date,
+    procedimento_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Busca slots livres no calendário do tenant para a data informada.
+    Retorna lista de {inicio, fim} em ISO 8601.
+    """
+    conn = await _get_calendar_connection(db, tenant_id)
+    if not conn:
         return []
-    
-    def _get_default_slots(self, data: str, duracao: int) -> List[Dict[str, Any]]:
-        """Retorna horários padrão (8h-18h) sem verificar disponibilidade real"""
-        slots = []
-        start_hour = 8
-        end_hour = 18
-        
-        current_time = datetime.strptime(f"{data} {start_hour:02d}:00", "%Y-%m-%d %H:%M")
-        end_time = datetime.strptime(f"{data} {end_hour:02d}:00", "%Y-%m-%d %H:%M")
-        
-        while current_time < end_time:
-            slots.append({
-                "hora": current_time.strftime("%H:%M"),
-                "disponivel": True,
-                "data_hora": current_time.isoformat()
-            })
-            current_time += timedelta(minutes=duracao)
-        
-        return slots
-    
-    async def _get_google_calendar_slots(
-        self,
-        connection: CalendarConnection,
-        data: str,
-        duracao: int
-    ) -> List[Dict[str, Any]]:
-        """Busca horários disponíveis no Google Calendar"""
-        # TODO: Implementar integração real com Google Calendar API
-        # Por enquanto, retornar slots padrão
-        return self._get_default_slots(data, duracao)
-    
-    async def _get_feegow_slots(
-        self,
-        connection: CalendarConnection,
-        data: str,
-        duracao: int
-    ) -> List[Dict[str, Any]]:
-        """Busca horários disponíveis no Feegow"""
-        # TODO: Implementar integração com Feegow API
-        return self._get_default_slots(data, duracao)
-    
-    async def criar_agendamento(
-        self,
-        contact_id: int,
-        procedimento_id: int,
-        data_hora: str,
-        observacoes: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Cria um agendamento
-        
-        Args:
-            contact_id: ID do contato
-            procedimento_id: ID do procedimento
-            data_hora: Data e hora no formato ISO (YYYY-MM-DDTHH:MM:SS)
-            observacoes: Observações adicionais
-        
-        Returns:
-            {sucesso: bool, id_evento: str, mensagem: str}
-        """
-        # Buscar procedimento
-        result = await self.db.execute(
-            select(Procedure).where(
-                Procedure.id == procedimento_id,
-                Procedure.tenant_id == self.tenant_id
+
+    creds = conn.credenciais or {}
+
+    if conn.provider == CalendarProvider.google:
+        return await _google_buscar_slots(creds, conn.id_agenda, data)
+
+    if conn.provider == CalendarProvider.feegow:
+        return await _feegow_buscar_slots(creds, data, procedimento_id)
+
+    return []
+
+
+async def _google_buscar_slots(
+    creds: Dict[str, Any], calendar_id: Optional[str], data: date
+) -> List[Dict[str, Any]]:
+    """Consulta Google Calendar FreeBusy API."""
+    access_token = creds.get("access_token", "")
+    cal_id = calendar_id or "primary"
+    time_min = f"{data.isoformat()}T00:00:00Z"
+    time_max = f"{data.isoformat()}T23:59:59Z"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://www.googleapis.com/calendar/v3/freeBusy",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "items": [{"id": cal_id}],
+            },
+        )
+        if resp.status_code != 200:
+            return []
+
+        busy = resp.json().get("calendars", {}).get(cal_id, {}).get("busy", [])
+        # Retorna os períodos ocupados — o front/agente calcula os livres
+        return [{"tipo": "ocupado", "inicio": b["start"], "fim": b["end"]} for b in busy]
+
+
+async def _feegow_buscar_slots(
+    creds: Dict[str, Any], data: date, procedimento_id: Optional[int]
+) -> List[Dict[str, Any]]:
+    """Consulta Feegow API para horários disponíveis."""
+    api_key = creds.get("api_key", "")
+    base_url = creds.get("base_url", "https://app.feegow.com/v1")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{base_url}/appointments/available",
+            headers={"x-api-key": api_key},
+            params={"date": data.isoformat(), "procedure_id": procedimento_id},
+        )
+        if resp.status_code != 200:
+            return []
+        return resp.json().get("slots", [])
+
+
+async def criar_agendamento(
+    db: AsyncSession,
+    tenant_id: int,
+    contact_id: int,
+    procedimento_id: int,
+    data_hora: datetime,
+    titulo: str = "Consulta",
+) -> Dict[str, Any]:
+    """Cria evento no calendário do tenant."""
+    conn = await _get_calendar_connection(db, tenant_id)
+    if not conn:
+        return {"erro": "Nenhum calendário configurado"}
+
+    creds = conn.credenciais or {}
+
+    if conn.provider == CalendarProvider.google:
+        return await _google_criar_evento(creds, conn.id_agenda, data_hora, titulo)
+
+    if conn.provider == CalendarProvider.feegow:
+        return await _feegow_criar_agendamento(creds, contact_id, procedimento_id, data_hora)
+
+    return {"erro": f"Provider {conn.provider} não suportado para criação"}
+
+
+async def _google_criar_evento(
+    creds: Dict[str, Any], calendar_id: Optional[str], data_hora: datetime, titulo: str
+) -> Dict[str, Any]:
+    from datetime import timedelta
+    access_token = creds.get("access_token", "")
+    cal_id = calendar_id or "primary"
+    start = data_hora.isoformat()
+    end = (data_hora + timedelta(minutes=30)).isoformat()
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"https://www.googleapis.com/calendar/v3/calendars/{cal_id}/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "summary": titulo,
+                "start": {"dateTime": start, "timeZone": "America/Sao_Paulo"},
+                "end": {"dateTime": end, "timeZone": "America/Sao_Paulo"},
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {"id_evento": data.get("id"), "link": data.get("htmlLink")}
+
+
+async def _feegow_criar_agendamento(
+    creds: Dict[str, Any], contact_id: int, procedimento_id: int, data_hora: datetime
+) -> Dict[str, Any]:
+    api_key = creds.get("api_key", "")
+    base_url = creds.get("base_url", "https://app.feegow.com/v1")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{base_url}/appointments",
+            headers={"x-api-key": api_key},
+            json={
+                "patient_id": contact_id,
+                "procedure_id": procedimento_id,
+                "datetime": data_hora.isoformat(),
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def cancelar_agendamento(
+    db: AsyncSession,
+    tenant_id: int,
+    id_evento: str,
+) -> Dict[str, Any]:
+    """Cancela/deleta evento no calendário do tenant."""
+    conn = await _get_calendar_connection(db, tenant_id)
+    if not conn:
+        return {"erro": "Nenhum calendário configurado"}
+
+    creds = conn.credenciais or {}
+
+    if conn.provider == CalendarProvider.google:
+        access_token = creds.get("access_token", "")
+        cal_id = conn.id_agenda or "primary"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.delete(
+                f"https://www.googleapis.com/calendar/v3/calendars/{cal_id}/events/{id_evento}",
+                headers={"Authorization": f"Bearer {access_token}"},
             )
-        )
-        procedure = result.scalar_one_or_none()
-        
-        if not procedure:
-            return {
-                "sucesso": False,
-                "mensagem": "Procedimento não encontrado"
-            }
-        
-        # Buscar conexão de calendário
-        result = await self.db.execute(
-            select(CalendarConnection).where(
-                CalendarConnection.tenant_id == self.tenant_id,
-                CalendarConnection.ativo == True
-            ).limit(1)
-        )
-        calendar_conn = result.scalar_one_or_none()
-        
-        # TODO: Criar evento no Google Calendar/Feegow
-        # TODO: Salvar na tabela de agendamentos (criar modelo)
-        
-        # Por enquanto, retornar sucesso simulado
-        return {
-            "sucesso": True,
-            "id_evento": f"evt_{datetime.now().timestamp()}",
-            "mensagem": f"Agendamento confirmado para {data_hora}",
-            "procedimento": procedure.nome,
-            "duracao": procedure.duracao_minutos
-        }
-    
-    async def cancelar_agendamento(
-        self,
-        id_evento: str,
-        motivo: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Cancela um agendamento
-        
-        Args:
-            id_evento: ID do evento
-            motivo: Motivo do cancelamento
-        
-        Returns:
-            {sucesso: bool, mensagem: str}
-        """
-        # TODO: Remover do Google Calendar/Feegow
-        # TODO: Atualizar tabela de agendamentos
-        # TODO: Disparar follow-up automático
-        
-        return {
-            "sucesso": True,
-            "mensagem": "Agendamento cancelado com sucesso",
-            "motivo": motivo
-        }
+            return {"cancelado": resp.status_code in (200, 204)}
+
+    if conn.provider == CalendarProvider.feegow:
+        api_key = creds.get("api_key", "")
+        base_url = creds.get("base_url", "https://app.feegow.com/v1")
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.delete(
+                f"{base_url}/appointments/{id_evento}",
+                headers={"x-api-key": api_key},
+            )
+            return {"cancelado": resp.status_code in (200, 204)}
+
+    return {"erro": f"Provider {conn.provider} não suportado para cancelamento"}
