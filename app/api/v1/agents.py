@@ -1,205 +1,162 @@
 """
-Agents Endpoints - CRUD de agentes IA
+Agents CRUD routes + AgentTools
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-from typing import List
+from pydantic import BaseModel
+
 from app.database import get_db
-from app.models.user import User, UserRole
 from app.models.agent import Agent, AgentTool
-from app.schemas.agent import AgentCreate, AgentUpdate, AgentResponse, AgentToolCreate
-from app.auth.dependencies import get_current_active_user, require_role
-from app.middleware.tenant import get_tenant_id
+from app.models.tenant import Tenant
+from app.models.user import User
+from app.schemas.agent import AgentCreate, AgentResponse
+from app.auth.dependencies import get_current_user, get_current_tenant
 
-router = APIRouter()
+router = APIRouter(prefix="/agents", tags=["agents"])
 
 
-@router.get("/", response_model=List[AgentResponse], summary="Listar agentes")
+class AgentToolCreate(BaseModel):
+    tipo: str
+    configuracoes: Optional[Dict[str, Any]] = {}
+    ativo: Optional[bool] = True
+
+
+class AgentToolResponse(BaseModel):
+    id: int
+    agent_id: int
+    tipo: str
+    configuracoes: Optional[Dict[str, Any]] = {}
+    ativo: bool
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/", response_model=List[AgentResponse])
 async def list_agents(
-    request: Request,
-    skip: int = 0,
-    limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Lista todos os agentes do tenant"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
+    result = await db.execute(select(Agent).where(Agent.tenant_id == tenant.id))
+    return result.scalars().all()
+
+
+@router.get("/{agent_id}", response_model=AgentResponse)
+async def get_agent(
+    agent_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
     result = await db.execute(
-        select(Agent)
-        .options(selectinload(Agent.tools))
-        .where(Agent.tenant_id == tenant_id)
-        .offset(skip)
-        .limit(limit)
+        select(Agent).where(Agent.id == agent_id, Agent.tenant_id == tenant.id)
     )
-    agents = result.scalars().all()
-    return agents
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agente não encontrado")
+    return agent
 
 
-@router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED, summary="Criar agente")
+@router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(
-    request: Request,
-    agent_data: AgentCreate,
+    payload: AgentCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Cria um novo agente IA (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    # Criar agente
-    agent = Agent(
-        tenant_id=tenant_id,
-        nome=agent_data.nome,
-        instrucoes=agent_data.instrucoes,
-        modelo_llm=agent_data.modelo_llm,
-        temperatura=agent_data.temperatura,
-        max_tokens=agent_data.max_tokens,
-        voz_elevenlabs=agent_data.voz_elevenlabs,
-        usar_voz=agent_data.usar_voz,
-        configuracoes=agent_data.configuracoes
-    )
-    
+    data = payload.model_dump()
+    data["tenant_id"] = tenant.id
+    agent = Agent(**data)
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
-    
     return agent
 
 
-@router.get("/{agent_id}", response_model=AgentResponse, summary="Obter agente")
-async def get_agent(
-    agent_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Obtém um agente específico"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    result = await db.execute(
-        select(Agent)
-        .options(selectinload(Agent.tools))
-        .where(
-            Agent.id == agent_id,
-            Agent.tenant_id == tenant_id
-        )
-    )
-    agent = result.scalar_one_or_none()
-    
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agente não encontrado"
-        )
-    
-    return agent
-
-
-@router.patch("/{agent_id}", response_model=AgentResponse, summary="Atualizar agente")
+@router.put("/{agent_id}", response_model=AgentResponse)
 async def update_agent(
     agent_id: int,
-    agent_data: AgentUpdate,
-    request: Request,
+    payload: AgentCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Atualiza um agente (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Agent).where(
-            Agent.id == agent_id,
-            Agent.tenant_id == tenant_id
-        )
+        select(Agent).where(Agent.id == agent_id, Agent.tenant_id == tenant.id)
     )
     agent = result.scalar_one_or_none()
-    
     if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agente não encontrado"
-        )
-    
-    # Atualizar campos
-    update_data = agent_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(agent, field, value)
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agente não encontrado")
+
+    for key, value in payload.model_dump().items():
+        setattr(agent, key, value)
+
     await db.commit()
     await db.refresh(agent)
-    
     return agent
 
 
-@router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Deletar agente")
+@router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_agent(
     agent_id: int,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Deleta um agente (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Agent).where(
-            Agent.id == agent_id,
-            Agent.tenant_id == tenant_id
-        )
+        select(Agent).where(Agent.id == agent_id, Agent.tenant_id == tenant.id)
     )
     agent = result.scalar_one_or_none()
-    
     if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agente não encontrado"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agente não encontrado")
     await db.delete(agent)
     await db.commit()
-    
-    return None
 
 
-@router.post("/{agent_id}/tools", status_code=status.HTTP_201_CREATED, summary="Adicionar ferramenta ao agente")
-async def add_agent_tool(
+# --- Agent Tools ---
+
+@router.get("/{agent_id}/tools", response_model=List[AgentToolResponse])
+async def list_tools(
     agent_id: int,
-    tool_data: AgentToolCreate,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Adiciona uma ferramenta a um agente"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    # Verificar se agente existe
-    result = await db.execute(
-        select(Agent).where(
-            Agent.id == agent_id,
-            Agent.tenant_id == tenant_id
-        )
-    )
-    agent = result.scalar_one_or_none()
-    
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agente não encontrado"
-        )
-    
-    # Criar ferramenta
-    tool = AgentTool(
-        agent_id=agent_id,
-        tipo=tool_data.tipo,
-        ativo=tool_data.ativo,
-        configuracoes=tool_data.configuracoes
-    )
-    
+    result = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
+    return result.scalars().all()
+
+
+@router.post("/{agent_id}/tools", response_model=AgentToolResponse, status_code=status.HTTP_201_CREATED)
+async def create_tool(
+    agent_id: int,
+    payload: AgentToolCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    tool = AgentTool(agent_id=agent_id, **payload.model_dump())
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
-    
     return tool
+
+
+@router.delete("/{agent_id}/tools/{tool_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_tool(
+    agent_id: int,
+    tool_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    result = await db.execute(
+        select(AgentTool).where(AgentTool.id == tool_id, AgentTool.agent_id == agent_id)
+    )
+    tool = result.scalar_one_or_none()
+    if not tool:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ferramenta não encontrada")
+    await db.delete(tool)
+    await db.commit()

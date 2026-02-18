@@ -1,208 +1,108 @@
 """
-Users Endpoints - CRUD de usuários
+Users CRUD routes (scoped to current tenant)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from passlib.context import CryptContext
+
 from app.database import get_db
-from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, ChangePassword
-from app.auth.dependencies import get_current_active_user, require_role
-from app.auth.password import hash_password, verify_password
-from app.middleware.tenant import get_tenant_id
+from app.models.user import User
+from app.models.tenant import Tenant
+from app.schemas.user import UserCreate, UserResponse
+from app.auth.dependencies import get_current_user, get_current_tenant
 
-router = APIRouter()
+router = APIRouter(prefix="/users", tags=["users"])
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-@router.get("/", response_model=List[UserResponse], summary="Listar usuários")
+@router.get("/", response_model=List[UserResponse])
 async def list_users(
-    request: Request,
-    skip: int = 0,
-    limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Lista todos os usuários do tenant"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
+    result = await db.execute(select(User).where(User.tenant_id == tenant.id))
+    return result.scalars().all()
+
+
+@router.get("/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
     result = await db.execute(
-        select(User)
-        .where(User.tenant_id == tenant_id)
-        .offset(skip)
-        .limit(limit)
+        select(User).where(User.id == user_id, User.tenant_id == tenant.id)
     )
-    users = result.scalars().all()
-    return users
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado")
+    return user
 
 
-@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED, summary="Criar usuário")
+@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
-    request: Request,
-    user_data: UserCreate,
+    payload: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Cria um novo usuário (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    # Verificar se email já existe no tenant
-    result = await db.execute(
-        select(User).where(
-            User.tenant_id == tenant_id,
-            User.email == user_data.email
-        )
-    )
-    existing_user = result.scalar_one_or_none()
-    
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email já cadastrado neste tenant"
-        )
-    
-    # Criar usuário
     user = User(
-        tenant_id=tenant_id,
-        nome=user_data.nome,
-        email=user_data.email,
-        senha_hash=hash_password(user_data.senha),
-        role=user_data.role,
-        telefone=user_data.telefone
+        tenant_id=tenant.id,
+        nome=payload.nome,
+        email=payload.email,
+        senha_hash=pwd_context.hash(payload.senha),
+        role=payload.role,
     )
-    
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    
     return user
 
 
-@router.get("/me", response_model=UserResponse, summary="Obter usuário atual")
-async def get_current_user_info(
-    current_user: User = Depends(get_current_active_user)
-):
-    """Retorna informações do usuário autenticado"""
-    return current_user
-
-
-@router.get("/{user_id}", response_model=UserResponse, summary="Obter usuário por ID")
-async def get_user(
-    user_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Obtém um usuário específico"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    result = await db.execute(
-        select(User).where(
-            User.id == user_id,
-            User.tenant_id == tenant_id
-        )
-    )
-    user = result.scalar_one_or_none()
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuário não encontrado"
-        )
-    
-    return user
-
-
-@router.patch("/{user_id}", response_model=UserResponse, summary="Atualizar usuário")
+@router.put("/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: int,
-    user_data: UserUpdate,
-    request: Request,
+    payload: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Atualiza um usuário (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(User).where(
-            User.id == user_id,
-            User.tenant_id == tenant_id
-        )
+        select(User).where(User.id == user_id, User.tenant_id == tenant.id)
     )
     user = result.scalar_one_or_none()
-    
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuário não encontrado"
-        )
-    
-    # Atualizar campos
-    update_data = user_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(user, field, value)
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado")
+
+    user.nome = payload.nome
+    user.email = payload.email
+    user.role = payload.role
+    if payload.senha:
+        user.senha_hash = pwd_context.hash(payload.senha)
+
     await db.commit()
     await db.refresh(user)
-    
     return user
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Deletar usuário")
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: int,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Deleta um usuário (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(User).where(
-            User.id == user_id,
-            User.tenant_id == tenant_id
-        )
+        select(User).where(User.id == user_id, User.tenant_id == tenant.id)
     )
     user = result.scalar_one_or_none()
-    
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuário não encontrado"
-        )
-    
-    # Não permitir deletar a si mesmo
-    if user.id == current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Não é possível deletar seu próprio usuário"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado")
     await db.delete(user)
     await db.commit()
-    
-    return None
-
-
-@router.post("/me/change-password", summary="Mudar senha")
-async def change_password(
-    password_data: ChangePassword,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Permite ao usuário mudar sua própria senha"""
-    # Verificar senha atual
-    if not verify_password(password_data.senha_atual, current_user.senha_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Senha atual incorreta"
-        )
-    
-    # Atualizar senha
-    current_user.senha_hash = hash_password(password_data.senha_nova)
-    await db.commit()
-    
-    return {"message": "Senha alterada com sucesso"}

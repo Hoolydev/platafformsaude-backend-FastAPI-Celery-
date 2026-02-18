@@ -1,162 +1,99 @@
 """
-Procedures Endpoints - CRUD de procedimentos
+Procedures CRUD routes
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+
 from app.database import get_db
-from app.models.user import User, UserRole
 from app.models.procedure import Procedure
-from app.schemas.procedure import ProcedureCreate, ProcedureUpdate, ProcedureResponse
-from app.auth.dependencies import get_current_active_user, require_role
-from app.middleware.tenant import get_tenant_id
+from app.models.tenant import Tenant
+from app.models.user import User
+from app.schemas.procedure import ProcedureCreate, ProcedureResponse
+from app.auth.dependencies import get_current_user, get_current_tenant
 
-router = APIRouter()
+router = APIRouter(prefix="/procedures", tags=["procedures"])
 
 
-@router.get("/", response_model=List[ProcedureResponse], summary="Listar procedimentos")
+@router.get("/", response_model=List[ProcedureResponse])
 async def list_procedures(
-    request: Request,
-    skip: int = 0,
-    limit: int = 100,
-    ativo: bool = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Lista todos os procedimentos do tenant"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    query = select(Procedure).where(Procedure.tenant_id == tenant_id)
-    
-    if ativo is not None:
-        query = query.where(Procedure.ativo == ativo)
-    
-    result = await db.execute(
-        query.offset(skip).limit(limit)
-    )
-    procedures = result.scalars().all()
-    return procedures
+    result = await db.execute(select(Procedure).where(Procedure.tenant_id == tenant.id))
+    return result.scalars().all()
 
 
-@router.post("/", response_model=ProcedureResponse, status_code=status.HTTP_201_CREATED, summary="Criar procedimento")
-async def create_procedure(
-    request: Request,
-    procedure_data: ProcedureCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.ATENDENTE))
-):
-    """Cria um novo procedimento"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    # Criar procedimento
-    procedure = Procedure(
-        tenant_id=tenant_id,
-        nome=procedure_data.nome,
-        descricao=procedure_data.descricao,
-        duracao_minutos=procedure_data.duracao_minutos,
-        valor=procedure_data.valor,
-        convenios_aceitos=procedure_data.convenios_aceitos,
-        categoria=procedure_data.categoria,
-        tags=procedure_data.tags
-    )
-    
-    db.add(procedure)
-    await db.commit()
-    await db.refresh(procedure)
-    
-    return procedure
-
-
-@router.get("/{procedure_id}", response_model=ProcedureResponse, summary="Obter procedimento")
+@router.get("/{procedure_id}", response_model=ProcedureResponse)
 async def get_procedure(
     procedure_id: int,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Obtém um procedimento específico"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Procedure).where(
-            Procedure.id == procedure_id,
-            Procedure.tenant_id == tenant_id
-        )
+        select(Procedure).where(Procedure.id == procedure_id, Procedure.tenant_id == tenant.id)
     )
-    procedure = result.scalar_one_or_none()
-    
-    if not procedure:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Procedimento não encontrado"
-        )
-    
-    return procedure
+    proc = result.scalar_one_or_none()
+    if not proc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Procedimento não encontrado")
+    return proc
 
 
-@router.patch("/{procedure_id}", response_model=ProcedureResponse, summary="Atualizar procedimento")
+@router.post("/", response_model=ProcedureResponse, status_code=status.HTTP_201_CREATED)
+async def create_procedure(
+    payload: ProcedureCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    data = payload.model_dump()
+    data["tenant_id"] = tenant.id
+    proc = Procedure(**data)
+    db.add(proc)
+    await db.commit()
+    await db.refresh(proc)
+    return proc
+
+
+@router.put("/{procedure_id}", response_model=ProcedureResponse)
 async def update_procedure(
     procedure_id: int,
-    procedure_data: ProcedureUpdate,
-    request: Request,
+    payload: ProcedureCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.ATENDENTE))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Atualiza um procedimento"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Procedure).where(
-            Procedure.id == procedure_id,
-            Procedure.tenant_id == tenant_id
-        )
+        select(Procedure).where(Procedure.id == procedure_id, Procedure.tenant_id == tenant.id)
     )
-    procedure = result.scalar_one_or_none()
-    
-    if not procedure:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Procedimento não encontrado"
-        )
-    
-    # Atualizar campos
-    update_data = procedure_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(procedure, field, value)
-    
+    proc = result.scalar_one_or_none()
+    if not proc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Procedimento não encontrado")
+
+    for key, value in payload.model_dump().items():
+        setattr(proc, key, value)
+
     await db.commit()
-    await db.refresh(procedure)
-    
-    return procedure
+    await db.refresh(proc)
+    return proc
 
 
-@router.delete("/{procedure_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Deletar procedimento")
+@router.delete("/{procedure_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_procedure(
     procedure_id: int,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN))
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Deleta um procedimento (apenas admins)"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Procedure).where(
-            Procedure.id == procedure_id,
-            Procedure.tenant_id == tenant_id
-        )
+        select(Procedure).where(Procedure.id == procedure_id, Procedure.tenant_id == tenant.id)
     )
-    procedure = result.scalar_one_or_none()
-    
-    if not procedure:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Procedimento não encontrado"
-        )
-    
-    await db.delete(procedure)
+    proc = result.scalar_one_or_none()
+    if not proc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Procedimento não encontrado")
+    await db.delete(proc)
     await db.commit()
-    
-    return None

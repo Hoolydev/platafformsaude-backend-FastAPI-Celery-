@@ -1,172 +1,115 @@
 """
-Contacts Endpoints - CRUD de contatos
+Contacts CRUD routes (scoped to tenant)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from pydantic import BaseModel
+
 from app.database import get_db
-from app.models.user import User
 from app.models.contact import Contact
-from app.schemas.contact import ContactCreate, ContactUpdate, ContactResponse
-from app.auth.dependencies import get_current_active_user
-from app.middleware.tenant import get_tenant_id
+from app.models.tenant import Tenant
+from app.models.user import User
+from app.auth.dependencies import get_current_user, get_current_tenant
 
-router = APIRouter()
+router = APIRouter(prefix="/contacts", tags=["contacts"])
 
 
-@router.get("/", response_model=List[ContactResponse], summary="Listar contatos")
+class ContactCreate(BaseModel):
+    telefone: str
+    nome: Optional[str] = None
+    email: Optional[str] = None
+    metadados: Optional[Dict[str, Any]] = {}
+
+
+class ContactResponse(BaseModel):
+    id: int
+    tenant_id: int
+    telefone: str
+    nome: Optional[str] = None
+    email: Optional[str] = None
+    metadados: Optional[Dict[str, Any]] = {}
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/", response_model=List[ContactResponse])
 async def list_contacts(
-    request: Request,
-    skip: int = 0,
-    limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Lista todos os contatos do tenant"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
+    result = await db.execute(select(Contact).where(Contact.tenant_id == tenant.id))
+    return result.scalars().all()
+
+
+@router.get("/{contact_id}", response_model=ContactResponse)
+async def get_contact(
+    contact_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
     result = await db.execute(
-        select(Contact)
-        .where(Contact.tenant_id == tenant_id)
-        .offset(skip)
-        .limit(limit)
+        select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant.id)
     )
-    contacts = result.scalars().all()
-    return contacts
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contato não encontrado")
+    return contact
 
 
-@router.post("/", response_model=ContactResponse, status_code=status.HTTP_201_CREATED, summary="Criar contato")
+@router.post("/", response_model=ContactResponse, status_code=status.HTTP_201_CREATED)
 async def create_contact(
-    request: Request,
-    contact_data: ContactCreate,
+    payload: ContactCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Cria um novo contato"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    # Verificar se telefone já existe no tenant
-    result = await db.execute(
-        select(Contact).where(
-            Contact.tenant_id == tenant_id,
-            Contact.telefone == contact_data.telefone
-        )
-    )
-    existing_contact = result.scalar_one_or_none()
-    
-    if existing_contact:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Telefone já cadastrado neste tenant"
-        )
-    
-    # Criar contato
-    contact = Contact(
-        tenant_id=tenant_id,
-        telefone=contact_data.telefone,
-        nome=contact_data.nome,
-        email=contact_data.email,
-        metadados=contact_data.metadados,
-        tags=contact_data.tags
-    )
-    
+    contact = Contact(tenant_id=tenant.id, **payload.model_dump())
     db.add(contact)
     await db.commit()
     await db.refresh(contact)
-    
     return contact
 
 
-@router.get("/{contact_id}", response_model=ContactResponse, summary="Obter contato")
-async def get_contact(
-    contact_id: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Obtém um contato específico"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
-    result = await db.execute(
-        select(Contact).where(
-            Contact.id == contact_id,
-            Contact.tenant_id == tenant_id
-        )
-    )
-    contact = result.scalar_one_or_none()
-    
-    if not contact:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Contato não encontrado"
-        )
-    
-    return contact
-
-
-@router.patch("/{contact_id}", response_model=ContactResponse, summary="Atualizar contato")
+@router.put("/{contact_id}", response_model=ContactResponse)
 async def update_contact(
     contact_id: int,
-    contact_data: ContactUpdate,
-    request: Request,
+    payload: ContactCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Atualiza um contato"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Contact).where(
-            Contact.id == contact_id,
-            Contact.tenant_id == tenant_id
-        )
+        select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant.id)
     )
     contact = result.scalar_one_or_none()
-    
     if not contact:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Contato não encontrado"
-        )
-    
-    # Atualizar campos
-    update_data = contact_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(contact, field, value)
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contato não encontrado")
+
+    for key, value in payload.model_dump().items():
+        setattr(contact, key, value)
+
     await db.commit()
     await db.refresh(contact)
-    
     return contact
 
 
-@router.delete("/{contact_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Deletar contato")
+@router.delete("/{contact_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_contact(
     contact_id: int,
-    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Deleta um contato"""
-    tenant_id = get_tenant_id(request) or current_user.tenant_id
-    
     result = await db.execute(
-        select(Contact).where(
-            Contact.id == contact_id,
-            Contact.tenant_id == tenant_id
-        )
+        select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant.id)
     )
     contact = result.scalar_one_or_none()
-    
     if not contact:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Contato não encontrado"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contato não encontrado")
     await db.delete(contact)
     await db.commit()
-    
-    return None
