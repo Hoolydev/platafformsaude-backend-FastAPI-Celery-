@@ -1,0 +1,43 @@
+# Core
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database
+sqlalchemy[asyncio]
+asyncpg
+alembic
+
+# Auth
+pydantic[email]
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+
+# HTTP Client
+httpx
+
+# Celery & Redis
+celery[redis]
+redis
+
+# Storage
+boto3
+
+# AI/LLM
+langchain
+langgraph
+langchain-openai
+anthropic
+openai
+
+# Supabase
+supabase
+
+# Monitoring
+flower
+
+# Utils
+python-dotenv
+python-dateutil
+pytz
