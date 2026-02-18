@@ -1,70 +1,36 @@
 """
-LeadRecovery Model - Recuperação de leads inativos
+Model: LeadRecovery
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum as SQLEnum
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
-
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum
+from sqlalchemy.sql import func
 from app.database import Base
 
 
-class LeadRecoveryTrigger(enum.Enum):
-    """Tipo de trigger que iniciou a recuperação"""
-    INATIVO = "inativo"  # Iniciou conversa mas não agendou
-    FALTOU = "faltou"  # Tinha consulta e faltou
-    CANCELOU = "cancelou"  # Cancelou sem reagendar
-    ORCAMENTO = "orcamento"  # Recebeu orçamento mas não respondeu
+class LeadTriggerTipo(str, enum.Enum):
+    inativo = "inativo"
+    faltou = "faltou"
+    cancelou = "cancelou"
 
 
-class LeadRecoveryStatus(enum.Enum):
-    """Status da recuperação"""
-    PENDENTE = "pendente"
-    EM_ANDAMENTO = "em_andamento"
-    RECUPERADO = "recuperado"
-    DESISTIU = "desistiu"
+class LeadRecoveryStatus(str, enum.Enum):
+    pendente = "pendente"
+    em_andamento = "em_andamento"
+    recuperado = "recuperado"
+    desistiu = "desistiu"
 
 
 class LeadRecovery(Base):
-    """
-    Recuperação de Leads
-    
-    Gerencia tentativas de recuperação de leads inativos
-    """
     __tablename__ = "lead_recoveries"
-    
-    # Relacionamentos
+
+    id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=False, index=True)
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=True)
-    
-    # Tipo de trigger
-    trigger_tipo = Column(
-        SQLEnum(LeadRecoveryTrigger),
-        nullable=False,
-        index=True
-    )
-    
-    # Status
-    status = Column(
-        SQLEnum(LeadRecoveryStatus),
-        nullable=False,
-        default=LeadRecoveryStatus.PENDENTE,
-        index=True
-    )
-    
-    # Controle de tentativas
-    tentativa_atual = Column(Integer, nullable=False, default=0)
-    max_tentativas = Column(Integer, nullable=False, default=3)
-    
-    # Agendamento
-    proxima_tentativa_em = Column(DateTime, nullable=True, index=True)
-    
-    # Relacionamentos ORM
-    tenant = relationship("Tenant", back_populates="lead_recoveries")
-    contact = relationship("Contact", back_populates="lead_recoveries")
-    conversation = relationship("Conversation", back_populates="lead_recoveries")
-    
-    def __repr__(self):
-        return f"<LeadRecovery {self.id}: {self.trigger_tipo.value} - {self.status.value}>"
+    trigger_tipo = Column(Enum(LeadTriggerTipo), nullable=False)
+    status = Column(Enum(LeadRecoveryStatus), default=LeadRecoveryStatus.pendente, nullable=False)
+    tentativa_atual = Column(Integer, default=0, nullable=False)
+    max_tentativas = Column(Integer, default=3, nullable=False)
+    proxima_tentativa_em = Column(DateTime(timezone=True), nullable=False, index=True)
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

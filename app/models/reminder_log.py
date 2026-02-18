@@ -1,62 +1,18 @@
 """
-ReminderLog Model - Log de lembretes enviados
+Model: ReminderLog
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum as SQLEnum
-from sqlalchemy.orm import relationship
-from datetime import datetime
-import enum
-
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.sql import func
 from app.database import Base
 
 
-class ReminderType(enum.Enum):
-    """Tipo de lembrete"""
-    CONFIRMACAO = "confirmacao"  # Imediato após agendamento
-    LEMBRETE_24H = "lembrete_24h"  # 24 horas antes
-    LEMBRETE_2H = "lembrete_2h"  # 2 horas antes
-
-
-class ReminderStatus(enum.Enum):
-    """Status do envio do lembrete"""
-    ENVIADO = "enviado"
-    ERRO = "erro"
-    PENDENTE = "pendente"
-
-
 class ReminderLog(Base):
-    """
-    Log de lembretes enviados
-    
-    Evita duplicatas e rastreia envios
-    """
     __tablename__ = "reminder_logs"
-    
-    # Relacionamento
+
+    id = Column(Integer, primary_key=True, index=True)
     appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False, index=True)
-    
-    # Tipo de lembrete
-    tipo_lembrete = Column(
-        SQLEnum(ReminderType),
-        nullable=False,
-        index=True
-    )
-    
-    # Status do envio
-    status = Column(
-        SQLEnum(ReminderStatus),
-        nullable=False,
-        default=ReminderStatus.PENDENTE
-    )
-    
-    # Timestamp do envio
-    enviado_em = Column(DateTime, nullable=True)
-    
-    # Erro (se houver)
-    erro = Column(Text, nullable=True)
-    
-    # Relacionamento ORM
-    appointment = relationship("Appointment", back_populates="reminder_logs")
-    
-    def __repr__(self):
-        return f"<ReminderLog {self.id}: {self.tipo_lembrete.value} - {self.status.value}>"
+    tipo_lembrete = Column(String(20), nullable=False)  # "24h" | "2h"
+    enviado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    status = Column(String(20), default="enviado")  # enviado | falhou
+    erro = Column(Text)

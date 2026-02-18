@@ -11,6 +11,9 @@ from app.models.agent import Agent, AgentTool
 from app.models.procedure import Procedure
 from app.models.whatsapp import WhatsappConnection, WhatsappProvider
 from app.models.calendar import CalendarConnection, CalendarProvider
+from app.models.appointment import Appointment, AppointmentStatus
+from app.models.reminder_log import ReminderLog
+from app.models.lead_recovery import LeadRecovery, LeadRecoveryStatus, LeadTriggerTipo
 
 __all__ = [
     "Tenant",
@@ -22,4 +25,7 @@ __all__ = [
     "Procedure",
     "WhatsappConnection", "WhatsappProvider",
     "CalendarConnection", "CalendarProvider",
+    "Appointment", "AppointmentStatus",
+    "ReminderLog",
+    "LeadRecovery", "LeadRecoveryStatus", "LeadTriggerTipo",
 ]
