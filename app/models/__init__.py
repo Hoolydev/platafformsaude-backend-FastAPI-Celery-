@@ -1,32 +1,25 @@
 """
-Models package - Todos os modelos SQLAlchemy
+Models — importa todos para que o Alembic detecte as tabelas
 """
 
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.models.contact import Contact
 from app.models.conversation import Conversation, ConversationStatus
-from app.models.message import Message, MessageOrigin, MessageType
+from app.models.message import Message, MessageOrigem, MessageTipo
 from app.models.agent import Agent, AgentTool
 from app.models.procedure import Procedure
-from app.models.connection import WhatsappConnection, CalendarConnection, WhatsappProvider, CalendarProvider
-from app.models.appointment import Appointment, AppointmentStatus
-from app.models.reminder_log import ReminderLog, ReminderType, ReminderStatus
-from app.models.lead_recovery import LeadRecovery, LeadRecoveryTrigger, LeadRecoveryStatus
+from app.models.whatsapp import WhatsappConnection, WhatsappProvider
+from app.models.calendar import CalendarConnection, CalendarProvider
 
 __all__ = [
     "Tenant",
-    "User",
-    "UserRole",
+    "User", "UserRole",
     "Contact",
-    "Conversation",
-    "ConversationStatus",
-    "Message",
-    "MessageOrigin",
-    "MessageType",
-    "Agent",
-    "AgentTool",
+    "Conversation", "ConversationStatus",
+    "Message", "MessageOrigem", "MessageTipo",
+    "Agent", "AgentTool",
     "Procedure",
-    "WhatsappConnection",
-    "CalendarConnection",
+    "WhatsappConnection", "WhatsappProvider",
+    "CalendarConnection", "CalendarProvider",
 ]

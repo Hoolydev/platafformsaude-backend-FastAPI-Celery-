@@ -1,98 +1,37 @@
 """
-JWT Token Management
+JWT — criação e validação de tokens
 """
 
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 from jose import JWTError, jwt
-import os
+from fastapi import HTTPException, status
 
-# Configurações JWT
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-jwt-secret-key-use-random-string")
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+from app.config import settings
+
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24h
 
 
-def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
-    """
-    Cria um access token JWT
-    
-    Args:
-        data: Dados a serem codificados no token (user_id, tenant_id, role, etc)
-        expires_delta: Tempo de expiração customizado
-    
-    Returns:
-        Token JWT codificado
-    """
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Cria um JWT de acesso."""
     to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    to_encode.update({
-        "exp": expire,
-        "type": "access"
-    })
-    
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    expire = datetime.now(timezone.utc) + (
+        expires_delta if expires_delta else timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_refresh_token(data: Dict[str, Any]) -> str:
-    """
-    Cria um refresh token JWT
-    
-    Args:
-        data: Dados a serem codificados no token
-    
-    Returns:
-        Refresh token JWT codificado
-    """
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    
-    to_encode.update({
-        "exp": expire,
-        "type": "refresh"
-    })
-    
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-def verify_token(token: str) -> Optional[Dict[str, Any]]:
-    """
-    Verifica e decodifica um token JWT
-    
-    Args:
-        token: Token JWT a ser verificado
-    
-    Returns:
-        Payload do token se válido, None caso contrário
-    """
+def decode_access_token(token: str) -> dict:
+    """Decodifica e valida um JWT. Lança HTTPException se inválido."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token inválido ou expirado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except JWTError:
-        return None
-
-
-def decode_token(token: str) -> Dict[str, Any]:
-    """
-    Decodifica um token JWT (sem verificar assinatura)
-    Útil para debugging
-    
-    Args:
-        token: Token JWT
-    
-    Returns:
-        Payload do token
-    """
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_signature": False})
-        return payload
-    except JWTError as e:
-        raise ValueError(f"Token inválido: {str(e)}")
+        raise credentials_exception

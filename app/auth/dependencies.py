@@ -1,137 +1,58 @@
 """
-Auth Dependencies - FastAPI dependencies para autenticação
+Auth Dependencies — get_current_user, get_current_tenant
 """
 
-from fastapi import Depends, HTTPException, status, Header
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Optional
-from app.database import get_db
-from app.models.user import User, UserRole
-from app.auth.jwt import verify_token
 
-# Security scheme
-security = HTTPBearer()
+from app.database import get_db
+from app.auth.jwt import decode_access_token
+from app.models.user import User
+from app.models.tenant import Tenant
+
+bearer_scheme = HTTPBearer()
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: AsyncSession = Depends(get_db)
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
 ) -> User:
-    """
-    Dependency para obter o usuário atual a partir do token JWT
-    
-    Raises:
-        HTTPException: Se o token for inválido ou o usuário não existir
-    
-    Returns:
-        Usuário autenticado
-    """
-    token = credentials.credentials
-    
-    # Verificar token
-    payload = verify_token(token)
-    if not payload:
+    """Retorna o usuário autenticado a partir do Bearer token."""
+    payload = decode_access_token(credentials.credentials)
+
+    user_id: int | None = payload.get("sub")
+    if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido ou expirado",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Token sem identificador de usuário",
         )
-    
-    # Verificar tipo de token
-    if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Tipo de token inválido",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Obter user_id do payload
-    user_id: int = payload.get("user_id")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Buscar usuário no banco
-    result = await db.execute(select(User).where(User.id == user_id))
+
+    result = await db.execute(select(User).where(User.id == int(user_id)))
     user = result.scalar_one_or_none()
-    
-    if not user:
+
+    if user is None or not user.ativo:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuário não encontrado",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Usuário não encontrado ou inativo",
         )
-    
+
     return user
 
 
-async def get_current_active_user(
-    current_user: User = Depends(get_current_user)
-) -> User:
-    """
-    Dependency para obter usuário ativo
-    
-    Raises:
-        HTTPException: Se o usuário estiver inativo
-    
-    Returns:
-        Usuário ativo
-    """
-    if not current_user.ativo:
+async def get_current_tenant(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Tenant:
+    """Retorna o tenant do usuário autenticado."""
+    result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+    tenant = result.scalar_one_or_none()
+
+    if tenant is None or not tenant.ativo:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Usuário inativo"
+            detail="Tenant não encontrado ou inativo",
         )
-    
-    return current_user
 
-
-def require_role(*allowed_roles: UserRole):
-    """
-    Dependency factory para verificar roles
-    
-    Usage:
-        @app.get("/admin")
-        async def admin_endpoint(user: User = Depends(require_role(UserRole.ADMIN))):
-            ...
-    
-    Args:
-        allowed_roles: Roles permitidas
-    
-    Returns:
-        Dependency function
-    """
-    async def role_checker(current_user: User = Depends(get_current_active_user)) -> User:
-        if current_user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Acesso negado. Roles permitidas: {[r.value for r in allowed_roles]}"
-            )
-        return current_user
-    
-    return role_checker
-
-
-async def get_tenant_id_from_header(
-    x_tenant_id: Optional[str] = Header(None)
-) -> Optional[int]:
-    """
-    Obtém tenant_id do header X-Tenant-ID
-    
-    Returns:
-        tenant_id se presente no header
-    """
-    if x_tenant_id:
-        try:
-            return int(x_tenant_id)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="X-Tenant-ID inválido"
-            )
-    return None
+    return tenant

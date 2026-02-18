@@ -1,64 +1,35 @@
 """
-Message Model - Mensagens
+Model: Message
 """
 
-from sqlalchemy import Column, String, Text, Integer, ForeignKey, Enum as SQLEnum, JSON
-from sqlalchemy.orm import relationship
-from app.database import Base
 import enum
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql import func
+from app.database import Base
 
 
-class MessageOrigin(str, enum.Enum):
-    """Origem da mensagem"""
-    CLIENTE = "cliente"
-    AGENTE = "agente"  # IA
-    ATENDENTE = "atendente"  # Humano
+class MessageOrigem(str, enum.Enum):
+    cliente = "cliente"
+    agente = "agente"
+    atendente = "atendente"
 
 
-class MessageType(str, enum.Enum):
-    """Tipo de mensagem"""
-    TEXTO = "texto"
-    AUDIO = "audio"
-    IMAGEM = "imagem"
-    DOCUMENTO = "documento"
-    VIDEO = "video"
-    LOCALIZACAO = "localizacao"
-    CONTATO = "contato"
+class MessageTipo(str, enum.Enum):
+    texto = "texto"
+    audio = "audio"
+    imagem = "imagem"
+    documento = "documento"
 
 
 class Message(Base):
-    """
-    Modelo de Mensagem
-    
-    Armazena todas as mensagens trocadas em uma conversa
-    """
     __tablename__ = "messages"
-    
-    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    origem = Column(SQLEnum(MessageOrigin), nullable=False)
-    tipo = Column(SQLEnum(MessageType), default=MessageType.TEXTO, nullable=False)
-    
-    # Conteúdo
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    origem = Column(Enum(MessageOrigem), nullable=False)
+    tipo = Column(Enum(MessageTipo), default=MessageTipo.texto, nullable=False)
     conteudo = Column(Text, nullable=False)
-    
-    # Metadados (URL de mídia, transcrição de áudio, etc)
-    metadados = Column(JSON, default=dict, nullable=False)
-    
-    # ID externo (do WhatsApp, por exemplo)
-    external_id = Column(String(255), nullable=True, index=True)
-    
-    # Relationships
-    conversation = relationship("Conversation", back_populates="messages")
-    
-    def __repr__(self):
-        return f"<Message {self.id} - {self.origem} - {self.tipo}>"
-    
-    @property
-    def is_from_client(self) -> bool:
-        return self.origem == MessageOrigin.CLIENTE
-    
-    @property
-    def is_from_ai(self) -> bool:
-        return self.origem == MessageOrigin.AGENTE
+    metadados = Column(JSONB, default={})
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
