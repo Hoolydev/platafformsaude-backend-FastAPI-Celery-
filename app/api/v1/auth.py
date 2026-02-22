@@ -5,7 +5,13 @@ Auth routes: login, refresh, logout
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from passlib.context import CryptContext
+import bcrypt
+
+def verificar_senha(senha: str, hash: str) -> bool:
+    return bcrypt.checkpw(senha.encode(), hash.encode())
+
+def hash_senha(senha: str) -> str:
+    return bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
 
 from app.database import get_db
 from app.models.user import User
@@ -15,7 +21,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# pwd_context removido em favor de bcrypt direto
 
 
 class TokenResponse(BaseModel):
@@ -33,7 +39,7 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    if not user or not pwd_context.verify(payload.senha, user.senha_hash):
+    if not user or not verificar_senha(payload.senha, user.senha_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email ou senha inválidos",

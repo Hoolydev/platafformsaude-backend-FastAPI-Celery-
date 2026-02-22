@@ -2,11 +2,7 @@
 Password Hashing and Verification
 """
 
-from passlib.context import CryptContext
-
-# Contexto de criptografia usando bcrypt
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
+import bcrypt
 
 def hash_password(password: str) -> str:
     """
@@ -18,7 +14,7 @@ def hash_password(password: str) -> str:
     Returns:
         Hash da senha
     """
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -32,4 +28,4 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True se a senha corresponde, False caso contrário
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())

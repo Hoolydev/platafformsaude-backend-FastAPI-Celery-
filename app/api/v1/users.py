@@ -6,17 +6,14 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from passlib.context import CryptContext
-
-from app.database import get_db
-from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.user import UserCreate, UserResponse
+from app.api.v1.auth import hash_senha
 from app.auth.dependencies import get_current_user, get_current_tenant
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# pwd_context removido
 
 
 @router.get("/", response_model=List[UserResponse])
@@ -56,7 +53,7 @@ async def create_user(
         tenant_id=tenant.id,
         nome=payload.nome,
         email=payload.email,
-        senha_hash=pwd_context.hash(payload.senha),
+        senha_hash=hash_senha(payload.senha),
         role=payload.role,
     )
     db.add(user)
@@ -84,7 +81,7 @@ async def update_user(
     user.email = payload.email
     user.role = payload.role
     if payload.senha:
-        user.senha_hash = pwd_context.hash(payload.senha)
+        user.senha_hash = hash_senha(payload.senha)
 
     await db.commit()
     await db.refresh(user)
