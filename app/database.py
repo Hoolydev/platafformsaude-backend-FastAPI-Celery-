@@ -1,16 +1,17 @@
+import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from app.config import settings
 
 Base = declarative_base()
 
 def get_engine():
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        raise ValueError("DATABASE_URL nao configurada")
     return create_async_engine(
-        settings.DATABASE_URL,
+        url,
         echo=False,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
     )
 
 def get_session_factory():
