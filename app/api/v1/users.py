@@ -6,6 +6,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.database import get_db
+from app.models.user import User
 from app.models.tenant import Tenant
 from app.schemas.user import UserCreate, UserResponse
 from app.api.v1.auth import hash_senha
