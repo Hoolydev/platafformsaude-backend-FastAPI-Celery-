@@ -9,7 +9,6 @@ from app.database import get_session_factory
 from app.models.message import Message, MessageOrigem, MessageTipo
 from app.models.conversation import Conversation, ConversationStatus
 from app.models.agent import Agent
-from app.models.whatsapp import WhatsappConnection
 
 
 def run_async(coro):
@@ -89,15 +88,17 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         await db.commit()
 
         # Enviar via WhatsApp
+        from sqlalchemy import text as sql_text
         result = await db.execute(
-            select(WhatsappConnection).where(
-                WhatsappConnection.tenant_id == conversa.tenant_id,
-                WhatsappConnection.ativo == True
-            )
+            sql_text("SELECT * FROM whatsapp_connections WHERE tenant_id = :tid AND ativo = true LIMIT 1"),
+            {"tid": conversa.tenant_id}
         )
-        conexao = result.scalar_one_or_none()
-        if conexao:
-            await enviar_whatsapp(conexao, conversa.canal_id, resposta)
+        conexao_row = result.fetchone()
+        
+        if conexao_row:
+            credenciais = conexao_row.credenciais or {}
+            provider = str(conexao_row.provider)
+            await enviar_zapi(credenciais, conversa.canal_id, resposta)
 
         return {"ok": True, "resposta": resposta}
 
@@ -161,33 +162,20 @@ async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages:
         return "Desculpe, tive um problema ao processar sua mensagem com Anthropic."
 
 
-async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
+async def enviar_zapi(credenciais: dict, telefone: str, mensagem: str):
     try:
-        config = conexao.config or {}
-        provider = str(conexao.provider.value) if hasattr(conexao.provider, 'value') else str(conexao.provider)
-        
-        if "zapi" in provider:
-            instance_id = config.get("instance_id", "")
-            token = config.get("token", "")
-            client_token = config.get("token_secreto", "")
-            async with httpx.AsyncClient(timeout=15) as client:
-                await client.post(
-                    f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text",
-                    headers={"Client-Token": client_token},
-                    json={"phone": telefone, "message": mensagem},
-                )
-        elif "evolution" in provider:
-            api_url = config.get("api_url", "")
-            api_key = config.get("api_key", "")
-            instance = config.get("instance", "")
-            async with httpx.AsyncClient(timeout=15) as client:
-                await client.post(
-                    f"{api_url}/message/sendText/{instance}",
-                    headers={"apikey": api_key},
-                    json={"number": telefone, "text": mensagem},
-                )
+        instance_id = credenciais.get("instance_id", "")
+        token = credenciais.get("token", "")
+        client_token = credenciais.get("token_secreto", "")
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.post(
+                f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text",
+                headers={"Client-Token": client_token},
+                json={"phone": telefone, "message": mensagem},
+            )
+            print(f"Z-API response: {res.status_code} {res.text}")
     except Exception as e:
-        print(f"Erro ao enviar WhatsApp: {e}")
+        print(f"Erro ao enviar Z-API: {e}")
 
 
 @shared_task(name="verificar_leads_inativos")
