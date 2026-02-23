@@ -9,7 +9,7 @@ from app.database import get_session_factory
 from app.models.message import Message, MessageOrigem, MessageTipo
 from app.models.conversation import Conversation, ConversationStatus
 from app.models.agent import Agent
-from app.models.whatsapp_connection import WhatsappConnection
+from app.models.whatsapp import WhatsappConnection
 
 
 def run_async(coro):
@@ -163,10 +163,10 @@ async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages:
 
 async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
     try:
-        config = conexao.credenciais or {}
-        provider = conexao.provider.value if hasattr(conexao.provider, 'value') else str(conexao.provider)
+        config = conexao.config or {}
+        provider = str(conexao.provider.value) if hasattr(conexao.provider, 'value') else str(conexao.provider)
         
-        if provider == "zapi":
+        if "zapi" in provider:
             instance_id = config.get("instance_id", "")
             token = config.get("token", "")
             client_token = config.get("token_secreto", "")
@@ -176,7 +176,7 @@ async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
                     headers={"Client-Token": client_token},
                     json={"phone": telefone, "message": mensagem},
                 )
-        elif provider == "evolution":
+        elif "evolution" in provider:
             api_url = config.get("api_url", "")
             api_key = config.get("api_key", "")
             instance = config.get("instance", "")
