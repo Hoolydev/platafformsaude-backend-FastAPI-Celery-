@@ -1,64 +1,186 @@
-"""
-Tasks genéricas — follow-up e outras tasks avulsas
-"""
-
-import asyncio
-from typing import Optional
-
+import os
+import httpx
+from celery import shared_task
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
 
-from app.config import settings
+from app.database import get_session_factory
+from app.models.message import Message, MessageOrigem, MessageTipo
+from app.models.conversation import Conversation, ConversationStatus
+from app.models.agent import Agent
+from app.models.whatsapp_connection import WhatsappConnection
 
-_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
-_SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
-async def _send_followup(
-    tenant_id: int,
-    contact_id: int,
-    mensagem: str,
-    conversation_id: Optional[int] = None,
-) -> None:
-    from app.models.contact import Contact
-    from app.models.whatsapp import WhatsappConnection
-    from app.integrations.whatsapp.factory import WhatsAppFactory
+@shared_task(name="processar_mensagem")
+def processar_mensagem(conversation_id: int, mensagem_cliente: str):
+    return run_async(_processar_mensagem(conversation_id, mensagem_cliente))
 
-    async with _SessionLocal() as db:
-        result = await db.execute(select(Contact).where(Contact.id == contact_id))
-        contact = result.scalar_one_or_none()
-        if not contact:
-            return
 
+async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
+    factory = get_session_factory()
+    async with factory() as db:
+        # Buscar conversa
         result = await db.execute(
-            select(WhatsappConnection).where(
-                WhatsappConnection.tenant_id == tenant_id,
-                WhatsappConnection.ativo == True,  # noqa: E712
+            select(Conversation).where(Conversation.id == conversation_id)
+        )
+        conversa = result.scalar_one_or_none()
+        if not conversa:
+            return {"erro": "Conversa não encontrada"}
+
+        # Só processar se estiver ativo (agente respondendo)
+        if conversa.status != ConversationStatus.ativo:
+            return {"info": "Conversa não está ativa para agente"}
+
+        # Buscar agente ativo do tenant
+        result = await db.execute(
+            select(Agent).where(
+                Agent.tenant_id == conversa.tenant_id,
+                Agent.ativo == True
             )
         )
-        wa_conn = result.scalars().first()
-        if not wa_conn:
-            return
+        agente = result.scalar_one_or_none()
+        if not agente:
+            return {"erro": "Nenhum agente ativo encontrado"}
 
-        provider = WhatsAppFactory.get_provider(
-            wa_conn.provider.value, wa_conn.credenciais or {}
+        # Buscar histórico recente (últimas 10 mensagens)
+        result = await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.criado_em.desc())
+            .limit(10)
         )
-        await provider.send_text(to=contact.telefone, text=mensagem)
+        historico = list(reversed(result.scalars().all()))
+
+        # Montar mensagens para o LLM
+        messages = []
+        for msg in historico:
+            role = "user" if msg.origem == MessageOrigem.cliente else "assistant"
+            messages.append({"role": role, "content": msg.conteudo})
+
+        # Chamar LLM
+        resposta = await chamar_llm(
+            modelo=agente.modelo_llm or "gpt-4o-mini",
+            instrucoes=agente.instrucoes or "Você é um assistente de clínica médica.",
+            messages=messages,
+            mensagem_atual=mensagem_cliente,
+        )
+
+        if not resposta:
+            return {"erro": "LLM não retornou resposta"}
+
+        # Salvar resposta no banco
+        nova_msg = Message(
+            conversation_id=conversation_id,
+            tenant_id=conversa.tenant_id,
+            origem=MessageOrigem.agente,
+            tipo=MessageTipo.texto,
+            conteudo=resposta,
+        )
+        db.add(nova_msg)
+        await db.commit()
+
+        # Enviar via WhatsApp
+        result = await db.execute(
+            select(WhatsappConnection).where(
+                WhatsappConnection.tenant_id == conversa.tenant_id,
+                WhatsappConnection.ativo == True
+            )
+        )
+        conexao = result.scalar_one_or_none()
+        if conexao:
+            await enviar_whatsapp(conexao, conversa.canal_id, resposta)
+
+        return {"ok": True, "resposta": resposta}
 
 
-def send_followup_message(
-    tenant_id: int,
-    contact_id: int,
-    mensagem: str,
-    conversation_id: Optional[int] = None,
-) -> None:
-    asyncio.run(_send_followup(tenant_id, contact_id, mensagem, conversation_id))
+async def chamar_llm(modelo: str, instrucoes: str, messages: list, mensagem_atual: str) -> str:
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if "claude" in modelo and anthropic_key:
+        return await chamar_anthropic(anthropic_key, modelo, instrucoes, messages, mensagem_atual)
+    elif openai_key:
+        return await chamar_openai(openai_key, modelo, instrucoes, messages, mensagem_atual)
+    else:
+        return "Desculpe, estou temporariamente indisponível. Por favor, aguarde um atendente."
 
 
-try:
-    from app.workers.celery_app import celery_app
-    send_followup_message = celery_app.task(
-        name="app.workers.tasks.send_followup_message"
-    )(send_followup_message)
-except Exception:
-    pass
+async def chamar_openai(api_key: str, modelo: str, instrucoes: str, messages: list, mensagem_atual: str) -> str:
+    messages_payload = [{"role": "system", "content": instrucoes}]
+    messages_payload.extend(messages)
+    messages_payload.append({"role": "user", "content": mensagem_atual})
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": modelo, "messages": messages_payload, "max_tokens": 500},
+        )
+        data = res.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages: list, mensagem_atual: str) -> str:
+    messages_payload = list(messages)
+    messages_payload.append({"role": "user", "content": mensagem_atual})
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": modelo,
+                "system": instrucoes,
+                "messages": messages_payload,
+                "max_tokens": 500,
+            },
+        )
+        data = res.json()
+        return data["content"][0]["text"]
+
+
+async def enviar_whatsapp(conexao: WhatsappConnection, telefone: str, mensagem: str):
+    try:
+        config = conexao.config or {}
+        if conexao.provider.value == "zapi":
+            instance_id = config.get("instance_id", "")
+            token = config.get("token", "")
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text",
+                    json={"phone": telefone, "message": mensagem},
+                )
+        elif conexao.provider.value == "evolution":
+            api_url = config.get("api_url", "")
+            api_key = config.get("api_key", "")
+            instance = config.get("instance", "")
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    f"{api_url}/message/sendText/{instance}",
+                    headers={"apikey": api_key},
+                    json={"number": telefone, "text": mensagem},
+                )
+    except Exception as e:
+        print(f"Erro ao enviar WhatsApp: {e}")
+
+
+@shared_task(name="verificar_leads_inativos")
+def verificar_leads_inativos():
+    return run_async(_verificar_leads_inativos())
+
+
+async def _verificar_leads_inativos():
+    # Placeholder para recuperação de leads
+    return {"ok": True, "info": "Verificação de leads executada"}
