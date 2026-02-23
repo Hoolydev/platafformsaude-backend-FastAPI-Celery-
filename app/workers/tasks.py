@@ -163,7 +163,7 @@ async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages:
 
 async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
     try:
-        config = conexao.config or {}
+        config = conexao.credenciais or {}
         provider = conexao.provider.value if hasattr(conexao.provider, 'value') else str(conexao.provider)
         
         if provider == "zapi":
