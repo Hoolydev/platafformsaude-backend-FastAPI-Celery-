@@ -1,83 +1,136 @@
 """
-Webhooks routes — recebe eventos dos providers WhatsApp e publica no Redis
+Webhook endpoint para receber mensagens do WhatsApp
+Compatível com Z-API e Evolution API
 """
 
-from typing import Any, Dict
-from fastapi import APIRouter, Request, BackgroundTasks
-import json
-import redis.asyncio as aioredis
+from fastapi import APIRouter, Request, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends
 
-from app.config import settings
+from app.database import get_db
+from app.models.contact import Contact
+from app.models.conversation import Conversation, ConversationStatus
+from app.models.message import Message, MessageOrigem, MessageTipo
+from app.models.tenant import Tenant
+from app.workers.tasks import processar_mensagem
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
-async def _publish_to_redis(channel: str, payload: Dict[str, Any]) -> None:
-    """Publica payload normalizado no Redis pub/sub."""
-    try:
-        r = aioredis.from_url(settings.REDIS_URL or "redis://localhost:6379")
-        await r.publish(channel, json.dumps(payload))
-        await r.aclose()
-    except Exception:
-        pass  # Não bloqueia o webhook se Redis estiver indisponível
-
-
-def _normalize(provider: str, tenant_id: int, raw: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-    return {
-        "provider": provider,
-        "tenant_id": tenant_id,
-        "raw": raw,
-        **kwargs,
-    }
-
-
-@router.post("/evolution/{tenant_id}/{instance_name}")
-async def webhook_evolution(
-    tenant_id: int,
-    instance_name: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-):
-    raw = await request.json()
-    payload = _normalize("evolution", tenant_id, raw, instance_name=instance_name)
-    background_tasks.add_task(_publish_to_redis, f"whatsapp:{tenant_id}", payload)
-    return {"status": "received"}
-
-
-@router.post("/zapi/{tenant_id}/{connection_id}")
+@router.post("/zapi/{tenant_id}")
 async def webhook_zapi(
     tenant_id: int,
-    connection_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
-    raw = await request.json()
-    payload = _normalize("zapi", tenant_id, raw, connection_id=connection_id)
-    background_tasks.add_task(_publish_to_redis, f"whatsapp:{tenant_id}", payload)
-    return {"status": "received"}
+    """Recebe mensagens da Z-API"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON inválido")
+
+    # Z-API payload
+    phone = body.get("phone", "")
+    message = body.get("text", {}).get("message", "") if body.get("text") else ""
+    is_from_me = body.get("fromMe", False)
+
+    if is_from_me or not phone or not message:
+        return {"ok": True, "info": "ignorado"}
+
+    await processar_webhook(db, tenant_id, phone, message)
+    return {"ok": True}
 
 
-@router.post("/uazapi/{tenant_id}/{connection_id}")
-async def webhook_uazapi(
+@router.post("/evolution/{tenant_id}")
+async def webhook_evolution(
     tenant_id: int,
-    connection_id: int,
     request: Request,
-    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
-    raw = await request.json()
-    payload = _normalize("uazapi", tenant_id, raw, connection_id=connection_id)
-    background_tasks.add_task(_publish_to_redis, f"whatsapp:{tenant_id}", payload)
-    return {"status": "received"}
+    """Recebe mensagens da Evolution API"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON inválido")
+
+    # Evolution payload
+    event = body.get("event", "")
+    if event != "messages.upsert":
+        return {"ok": True, "info": "evento ignorado"}
+
+    data = body.get("data", {})
+    key = data.get("key", {})
+    is_from_me = key.get("fromMe", False)
+    phone = key.get("remoteJid", "").replace("@s.whatsapp.net", "")
+    message = data.get("message", {}).get("conversation", "")
+
+    if is_from_me or not phone or not message:
+        return {"ok": True, "info": "ignorado"}
+
+    await processar_webhook(db, tenant_id, phone, message)
+    return {"ok": True}
 
 
-@router.post("/oficial/{tenant_id}/{connection_id}")
-async def webhook_oficial(
+async def processar_webhook(
+    db: AsyncSession,
     tenant_id: int,
-    connection_id: int,
-    request: Request,
-    background_tasks: BackgroundTasks,
+    telefone: str,
+    mensagem: str,
 ):
-    raw = await request.json()
-    payload = _normalize("oficial", tenant_id, raw, connection_id=connection_id)
-    background_tasks.add_task(_publish_to_redis, f"whatsapp:{tenant_id}", payload)
-    return {"status": "received"}
+    # Verificar tenant
+    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    tenant = result.scalar_one_or_none()
+    if not tenant or not tenant.ativo:
+        return
+
+    # Buscar ou criar contato
+    result = await db.execute(
+        select(Contact).where(
+            Contact.tenant_id == tenant_id,
+            Contact.telefone == telefone,
+        )
+    )
+    contato = result.scalar_one_or_none()
+    if not contato:
+        contato = Contact(
+            tenant_id=tenant_id,
+            telefone=telefone,
+            nome=telefone,
+        )
+        db.add(contato)
+        await db.flush()
+
+    # Buscar ou criar conversa ativa
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.tenant_id == tenant_id,
+            Conversation.contact_id == contato.id,
+            Conversation.status != ConversationStatus.concluido,
+        )
+    )
+    conversa = result.scalar_one_or_none()
+    if not conversa:
+        conversa = Conversation(
+            tenant_id=tenant_id,
+            contact_id=contato.id,
+            canal="whatsapp",
+            canal_id=telefone,
+            status=ConversationStatus.ativo,
+        )
+        db.add(conversa)
+        await db.flush()
+
+    # Salvar mensagem do cliente
+    nova_msg = Message(
+        conversation_id=conversa.id,
+        tenant_id=tenant_id,
+        origem=MessageOrigem.cliente,
+        tipo=MessageTipo.texto,
+        conteudo=mensagem,
+    )
+    db.add(nova_msg)
+    await db.commit()
+
+    # Disparar worker Celery
+    processar_mensagem.delay(conversa.id, mensagem)
