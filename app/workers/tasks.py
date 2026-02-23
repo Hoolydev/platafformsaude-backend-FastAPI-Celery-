@@ -151,18 +151,22 @@ async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages:
         return data["content"][0]["text"]
 
 
-async def enviar_whatsapp(conexao: WhatsappConnection, telefone: str, mensagem: str):
+async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
     try:
         config = conexao.config or {}
-        if conexao.provider.value == "zapi":
+        provider = conexao.provider.value if hasattr(conexao.provider, 'value') else str(conexao.provider)
+        
+        if provider == "zapi":
             instance_id = config.get("instance_id", "")
             token = config.get("token", "")
+            client_token = config.get("token_secreto", "")
             async with httpx.AsyncClient(timeout=15) as client:
                 await client.post(
                     f"https://api.z-api.io/instances/{instance_id}/token/{token}/send-text",
+                    headers={"Client-Token": client_token},
                     json={"phone": telefone, "message": mensagem},
                 )
-        elif conexao.provider.value == "evolution":
+        elif provider == "evolution":
             api_url = config.get("api_url", "")
             api_key = config.get("api_key", "")
             instance = config.get("instance", "")
