@@ -119,36 +119,46 @@ async def chamar_openai(api_key: str, modelo: str, instrucoes: str, messages: li
     messages_payload.extend(messages)
     messages_payload.append({"role": "user", "content": mensagem_atual})
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        res = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={"model": modelo, "messages": messages_payload, "max_tokens": 500},
-        )
-        data = res.json()
-        return data["choices"][0]["message"]["content"]
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": modelo, "messages": messages_payload, "max_tokens": 500},
+            )
+            res.raise_for_status()
+            data = res.json()
+            return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Erro OpenAI: {e}")
+        return "Desculpe, tive um problema ao processar sua mensagem com OpenAI."
 
 
 async def chamar_anthropic(api_key: str, modelo: str, instrucoes: str, messages: list, mensagem_atual: str) -> str:
     messages_payload = list(messages)
     messages_payload.append({"role": "user", "content": mensagem_atual})
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        res = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": modelo,
-                "system": instrucoes,
-                "messages": messages_payload,
-                "max_tokens": 500,
-            },
-        )
-        data = res.json()
-        return data["content"][0]["text"]
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": modelo,
+                    "system": instrucoes,
+                    "messages": messages_payload,
+                    "max_tokens": 500,
+                },
+            )
+            res.raise_for_status()
+            data = res.json()
+            return data["content"][0]["text"]
+    except Exception as e:
+        print(f"Erro Anthropic: {e}")
+        return "Desculpe, tive um problema ao processar sua mensagem com Anthropic."
 
 
 async def enviar_whatsapp(conexao, telefone: str, mensagem: str):
