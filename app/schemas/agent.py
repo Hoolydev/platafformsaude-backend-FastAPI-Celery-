@@ -13,6 +13,7 @@ class AgentCreate(BaseModel):
     modelo_llm: Optional[str] = "gpt-4o"
     voz_elevenlabs: Optional[str] = None
     configuracoes: Optional[Dict[str, Any]] = {}
+    ativo: Optional[bool] = True
 
 
 class AgentResponse(BaseModel):
