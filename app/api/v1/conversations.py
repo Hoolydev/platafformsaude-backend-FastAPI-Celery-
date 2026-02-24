@@ -6,6 +6,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.conversation import Conversation, ConversationStatus
@@ -21,7 +22,9 @@ async def _get_conversation_or_404(
     conversation_id: int, tenant_id: int, db: AsyncSession
 ) -> Conversation:
     result = await db.execute(
-        select(Conversation).where(
+        select(Conversation)
+        .options(selectinload(Conversation.contact))
+        .where(
             Conversation.id == conversation_id,
             Conversation.tenant_id == tenant_id,
         )
@@ -39,7 +42,9 @@ async def list_conversations(
     tenant: Tenant = Depends(get_current_tenant),
 ):
     result = await db.execute(
-        select(Conversation).where(Conversation.tenant_id == tenant.id)
+        select(Conversation)
+        .options(selectinload(Conversation.contact))
+        .where(Conversation.tenant_id == tenant.id)
     )
     return result.scalars().all()
 

@@ -4,6 +4,7 @@ Model: Conversation
 
 import enum
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Enum, DateTime
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -25,3 +26,6 @@ class Conversation(Base):
     agente_ativo = Column(Boolean, default=True, nullable=False)
     atendente_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    contact = relationship("Contact", lazy="noload")
+
