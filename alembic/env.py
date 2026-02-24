@@ -1,10 +1,15 @@
 import asyncio
 import os
+import sys
 from logging.config import fileConfig
 from sqlalchemy.ext.asyncio import create_async_engine
 from alembic import context
-from app.models import *
-from app.database import Base
+
+# Garante que o diretório raiz do projeto está no sys.path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from app.models import *  # noqa: E402, F401, F403
+from app.database import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
