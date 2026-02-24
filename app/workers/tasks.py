@@ -33,11 +33,26 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         )
         conversa = result.scalar_one_or_none()
         if not conversa:
+            print(f"[AGENT] Conversa {conversation_id} não encontrada")
             return {"erro": "Conversa não encontrada"}
 
         # Só processar se estiver ativo (agente respondendo)
         if conversa.status != ConversationStatus.ativo:
+            print(f"[AGENT] Conversa {conversation_id} não está ativa")
             return {"info": "Conversa não está ativa para agente"}
+
+        # Buscar contato para pegar o telefone
+        from app.models.contact import Contact
+        result = await db.execute(
+            select(Contact).where(Contact.id == conversa.contact_id)
+        )
+        contato = result.scalar_one_or_none()
+        if not contato:
+            print(f"[AGENT] Contato não encontrado para conversa {conversation_id}")
+            return {"erro": "Contato não encontrado"}
+
+        telefone = contato.telefone
+        print(f"[AGENT] Processando mensagem para {telefone}: {mensagem_cliente[:50]}")
 
         # Buscar agente ativo do tenant
         result = await db.execute(
@@ -48,6 +63,7 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         )
         agente = result.scalar_one_or_none()
         if not agente:
+            print(f"[AGENT] Nenhum agente ativo para tenant {conversa.tenant_id}")
             return {"erro": "Nenhum agente ativo encontrado"}
 
         # Buscar histórico recente (últimas 10 mensagens)
@@ -66,6 +82,7 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
             messages.append({"role": role, "content": msg.conteudo})
 
         # Chamar LLM
+        print(f"[AGENT] Chamando LLM {agente.modelo_llm} para conversa {conversation_id}")
         resposta = await chamar_llm(
             modelo=agente.modelo_llm or "gpt-4o-mini",
             instrucoes=agente.instrucoes or "Você é um assistente de clínica médica.",
@@ -74,7 +91,10 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         )
 
         if not resposta:
+            print(f"[AGENT] LLM não retornou resposta")
             return {"erro": "LLM não retornou resposta"}
+
+        print(f"[AGENT] LLM respondeu: {resposta[:80]}...")
 
         # Salvar resposta no banco
         nova_msg = Message(
@@ -97,8 +117,10 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         
         if conexao_row:
             credenciais = conexao_row.credenciais or {}
-            provider = str(conexao_row.provider)
-            await enviar_zapi(credenciais, conversa.canal, resposta)
+            print(f"[AGENT] Enviando WhatsApp para {telefone} via Z-API")
+            await enviar_zapi(credenciais, telefone, resposta)
+        else:
+            print(f"[AGENT] Nenhuma conexão WhatsApp ativa para tenant {conversa.tenant_id}")
 
         return {"ok": True, "resposta": resposta}
 
