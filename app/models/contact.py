@@ -15,4 +15,5 @@ class Contact(Base):
     telefone = Column(String(30), nullable=False, index=True)
     nome = Column(String(255))
     email = Column(String(255))
+    tags = Column(JSONB, default=[])
     metadados = Column(JSONB, default={})

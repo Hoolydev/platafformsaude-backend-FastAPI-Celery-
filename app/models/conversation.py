@@ -25,6 +25,8 @@ class Conversation(Base):
     status = Column(Enum(ConversationStatus), default=ConversationStatus.ativo, nullable=False)
     agente_ativo = Column(Boolean, default=True, nullable=False)
     atendente_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    flow_id = Column(Integer, ForeignKey("flows.id"), nullable=True)
+    current_node_id = Column(Integer, ForeignKey("flow_nodes.id"), nullable=True)
     criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     contact = relationship("Contact", lazy="noload")

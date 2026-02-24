@@ -52,7 +52,33 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
             return {"erro": "Contato não encontrado"}
 
         telefone = contato.telefone
-        print(f"[AGENT] Processando mensagem para {telefone}: {mensagem_cliente[:50]}")
+        msg_preview = (mensagem_cliente or "")[:50]
+        print(f"[AGENT] Processando mensagem for {telefone}: {msg_preview}")
+
+        # --- LÓGICA DE FLUXO ---
+        if conversa.flow_id:
+            from app.services.flow_executor import FlowExecutor
+            executor = FlowExecutor(db, conversa.tenant_id)
+            flow_result = await executor.execute_step(conversa, contato, mensagem_cliente)
+            
+            if flow_result and flow_result.get("response") != "USE_AGENT":
+                resposta = flow_result.get("response")
+                if resposta:
+                    # Salvar resposta no banco
+                    nova_msg = Message(
+                        conversation_id=conversation_id,
+                        tenant_id=conversa.tenant_id,
+                        origem=MessageOrigem.agente,
+                        tipo=MessageTipo.texto,
+                        conteudo=resposta,
+                    )
+                    db.add(nova_msg)
+                    await db.commit()
+
+                    # Enviar via WhatsApp
+                    await _enviar_whatsapp_conversa(db, conversa, telefone, resposta)
+                    return {"ok": True, "flow": True, "resposta": resposta}
+        # --- FIM LÓGICA DE FLUXO ---
 
         # Buscar agente ativo do tenant
         result = await db.execute(
@@ -108,21 +134,25 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         await db.commit()
 
         # Enviar via WhatsApp
-        from sqlalchemy import text as sql_text
-        result = await db.execute(
-            sql_text("SELECT * FROM whatsapp_connections WHERE tenant_id = :tid AND ativo = true LIMIT 1"),
-            {"tid": conversa.tenant_id}
-        )
-        conexao_row = result.fetchone()
-        
-        if conexao_row:
-            credenciais = conexao_row.credenciais or {}
-            print(f"[AGENT] Enviando WhatsApp para {telefone} via Z-API")
-            await enviar_zapi(credenciais, telefone, resposta)
-        else:
-            print(f"[AGENT] Nenhuma conexão WhatsApp ativa para tenant {conversa.tenant_id}")
+        await _enviar_whatsapp_conversa(db, conversa, telefone, resposta)
 
         return {"ok": True, "resposta": resposta}
+
+
+async def _enviar_whatsapp_conversa(db: AsyncSession, conversa: Conversation, telefone: str, resposta: str):
+    from sqlalchemy import text as sql_text
+    result = await db.execute(
+        sql_text("SELECT * FROM whatsapp_connections WHERE tenant_id = :tid AND ativo = true LIMIT 1"),
+        {"tid": conversa.tenant_id}
+    )
+    conexao_row = result.fetchone()
+    
+    if conexao_row:
+        credenciais = conexao_row.credenciais or {}
+        print(f"[AGENT] Enviando WhatsApp para {telefone} via Z-API")
+        await enviar_zapi(credenciais, telefone, resposta)
+    else:
+        print(f"[AGENT] Nenhuma conexão WhatsApp ativa para tenant {conversa.tenant_id}")
 
 
 async def chamar_llm(modelo: str, instrucoes: str, messages: list, mensagem_atual: str) -> str:

@@ -4,7 +4,7 @@ API v1 Router — agrega todas as rotas com prefixo /api/v1
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, tenants, users, contacts, conversations, messages, agents, procedures, whatsapp, webhooks
+from app.api.v1 import auth, tenants, users, contacts, conversations, messages, agents, procedures, whatsapp, webhooks, flows
 
 router = APIRouter(prefix="/api/v1")
 
@@ -18,3 +18,4 @@ router.include_router(agents.router)
 router.include_router(procedures.router)
 router.include_router(whatsapp.router)
 router.include_router(webhooks.router)
+router.include_router(flows.router)

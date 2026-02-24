@@ -21,6 +21,7 @@ class ContactCreate(BaseModel):
     telefone: str
     nome: Optional[str] = None
     email: Optional[str] = None
+    tags: Optional[List[str]] = []
     metadados: Optional[Dict[str, Any]] = {}
 
 
@@ -30,6 +31,7 @@ class ContactResponse(BaseModel):
     telefone: str
     nome: Optional[str] = None
     email: Optional[str] = None
+    tags: Optional[List[str]] = []
     metadados: Optional[Dict[str, Any]] = {}
 
     model_config = {"from_attributes": True}

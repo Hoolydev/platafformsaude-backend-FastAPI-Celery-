@@ -14,6 +14,7 @@ from app.models.calendar import CalendarConnection, CalendarProvider
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.reminder_log import ReminderLog
 from app.models.lead_recovery import LeadRecovery, LeadRecoveryStatus, LeadTriggerTipo
+from app.models.flow import Flow, FlowNode, FlowEdge
 
 __all__ = [
     "Tenant",
@@ -28,4 +29,5 @@ __all__ = [
     "Appointment", "AppointmentStatus",
     "ReminderLog",
     "LeadRecovery", "LeadRecoveryStatus", "LeadTriggerTipo",
+    "Flow", "FlowNode", "FlowEdge",
 ]

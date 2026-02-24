@@ -65,6 +65,23 @@ async def assumir_conversa(
     return conv
 
 
+@router.patch("/{conversation_id}/transferir", response_model=ConversationResponse)
+async def transferir_conversa(
+    conversation_id: int,
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    conv = await _get_conversation_or_404(conversation_id, tenant.id, db)
+    conv.status = ConversationStatus.assumido
+    conv.agente_ativo = False
+    conv.atendente_id = user_id
+    await db.commit()
+    await db.refresh(conv)
+    return conv
+
+
 @router.patch("/{conversation_id}/concluir", response_model=ConversationResponse)
 async def concluir_conversa(
     conversation_id: int,
