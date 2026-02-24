@@ -13,8 +13,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from app.config import settings
 
 # Engine dedicado para workers (não compartilha com FastAPI)
-_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
-_SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+_engine = None
+_SessionLocal = None
+
+def _get_session():
+    global _engine, _SessionLocal
+    if _engine is None:
+        _engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+        _SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    return _SessionLocal
 
 
 def get_celery():
@@ -42,7 +49,7 @@ async def _process(tenant_id: int, message_data: Dict[str, Any]) -> None:
     conteudo = message_data.get("content", "")
     canal = message_data.get("provider", "evolution")
 
-    async with _SessionLocal() as db:
+    async with _get_session()() as db:
         # 1. Buscar ou criar Contact
         result = await db.execute(
             select(Contact).where(Contact.tenant_id == tenant_id, Contact.telefone == telefone)
