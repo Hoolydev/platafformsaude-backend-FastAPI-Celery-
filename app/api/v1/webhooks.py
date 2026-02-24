@@ -107,7 +107,7 @@ async def processar_webhook(
             Conversation.tenant_id == tenant_id,
             Conversation.contact_id == contato.id,
             Conversation.status != ConversationStatus.concluido,
-        )
+        ).order_by(Conversation.criado_em.desc()).limit(1)
     )
     conversa = result.scalar_one_or_none()
     if not conversa:
@@ -115,8 +115,8 @@ async def processar_webhook(
             tenant_id=tenant_id,
             contact_id=contato.id,
             canal="whatsapp",
-            canal_id=telefone,
             status=ConversationStatus.ativo,
+            agente_ativo=True,
         )
         db.add(conversa)
         await db.flush()

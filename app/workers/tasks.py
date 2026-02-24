@@ -98,7 +98,7 @@ async def _processar_mensagem(conversation_id: int, mensagem_cliente: str):
         if conexao_row:
             credenciais = conexao_row.credenciais or {}
             provider = str(conexao_row.provider)
-            await enviar_zapi(credenciais, conversa.canal_id, resposta)
+            await enviar_zapi(credenciais, conversa.canal, resposta)
 
         return {"ok": True, "resposta": resposta}
 
