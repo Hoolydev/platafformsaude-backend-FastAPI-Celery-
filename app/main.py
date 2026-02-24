@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router as api_v1_router
+from app.api.v1.health import router as health_router
 
 # Criar app
 app = FastAPI(
@@ -25,9 +26,11 @@ app.add_middleware(
 
 # Rotas
 app.include_router(api_v1_router)
+app.include_router(health_router)
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "version": "1.0.0"}
+
